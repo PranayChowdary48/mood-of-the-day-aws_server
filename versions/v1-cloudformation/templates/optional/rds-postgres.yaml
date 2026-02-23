@@ -1,0 +1,107 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Optional RDS PostgreSQL module for mood history persistence.
+
+Parameters:
+  EnvName:
+    Type: String
+    AllowedValues: [dev, prod]
+    Default: dev
+  DbName:
+    Type: String
+    Default: mood
+  DbUser:
+    Type: String
+    Default: moodapp
+  DbPassword:
+    Type: String
+    NoEcho: true
+    Default: moodpass123
+  DbInstanceClass:
+    Type: String
+    Default: db.t3.micro
+  AllocatedStorage:
+    Type: Number
+    Default: 20
+
+Resources:
+  RdsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow PostgreSQL from VPC CIDR.
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: Mood-${EnvName}-VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp:
+            Fn::ImportValue:
+              Fn::Sub: Mood-${EnvName}-VpcCidr
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub mood-${EnvName}-db-subnet-group
+      SubnetIds:
+        - Fn::ImportValue:
+            Fn::Sub: Mood-${EnvName}-PrivateSubnetAz1Id
+        - Fn::ImportValue:
+            Fn::Sub: Mood-${EnvName}-PrivateSubnetAz2Id
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub mood-${EnvName}-postgres
+      Engine: postgres
+      DBInstanceClass: !Ref DbInstanceClass
+      AllocatedStorage: !Ref AllocatedStorage
+      DBName: !Ref DbName
+      MasterUsername: !Ref DbUser
+      MasterUserPassword: !Ref DbPassword
+      PubliclyAccessible: false
+      MultiAZ: false
+      AutoMinorVersionUpgrade: true
+      StorageEncrypted: false
+      BackupRetentionPeriod: 1
+      VPCSecurityGroups: [!Ref RdsSecurityGroup]
+      DBSubnetGroupName: !Ref DbSubnetGroup
+
+  DbCredentialsSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub mood/${EnvName}/db
+      Description: PostgreSQL credentials for mood app
+      SecretString: !Sub |
+        {"username":"${DbUser}","password":"${DbPassword}"}
+
+Outputs:
+  DbHost:
+    Value: !GetAtt Database.Endpoint.Address
+    Export:
+      Name: !Sub Mood-${EnvName}-DbHost
+
+  DbPort:
+    Value: !GetAtt Database.Endpoint.Port
+    Export:
+      Name: !Sub Mood-${EnvName}-DbPort
+
+  DbName:
+    Value: !Ref DbName
+    Export:
+      Name: !Sub Mood-${EnvName}-DbName
+
+  DbUser:
+    Value: !Ref DbUser
+    Export:
+      Name: !Sub Mood-${EnvName}-DbUser
+
+  DbSecretArn:
+    Value: !Ref DbCredentialsSecret
+    Export:
+      Name: !Sub Mood-${EnvName}-DbSecretArn

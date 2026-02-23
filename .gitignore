@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.pyc
+
+# CDK python
+versions/v2-cdk-python/.venv/
+versions/v2-cdk-python/cdk.out/
+
+# Local outputs
+*.log
+.DS_Store

@@ -1,0 +1,313 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: CloudWatch dashboards and SLO-oriented alarms.
+
+Parameters:
+  EnvName:
+    Type: String
+    AllowedValues: [dev, prod]
+    Default: dev
+  LoadBalancerType:
+    Type: String
+    AllowedValues: [alb, nlb]
+    Default: alb
+  EnableAlerts:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+
+Conditions:
+  IsAlb: !Equals [!Ref LoadBalancerType, alb]
+  IsNlb: !Equals [!Ref LoadBalancerType, nlb]
+  UseAlerts: !Equals [!Ref EnableAlerts, "true"]
+
+Resources:
+  AlbDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Condition: IsAlb
+    Properties:
+      DashboardName: !Sub mood-${EnvName}-alb-dashboard
+      DashboardBody:
+        Fn::Sub:
+          - |
+            {
+              "widgets": [
+                {
+                  "type": "metric",
+                  "x": 0,
+                  "y": 0,
+                  "width": 8,
+                  "height": 6,
+                  "properties": {
+                    "title": "ALB Request Count",
+                    "region": "${AWS::Region}",
+                    "view": "timeSeries",
+                    "metrics": [
+                      ["AWS/ApplicationELB", "RequestCount", "LoadBalancer", "${LoadBalancerFullName}"]
+                    ]
+                  }
+                },
+                {
+                  "type": "metric",
+                  "x": 8,
+                  "y": 0,
+                  "width": 8,
+                  "height": 6,
+                  "properties": {
+                    "title": "Target 5xx",
+                    "region": "${AWS::Region}",
+                    "view": "timeSeries",
+                    "metrics": [
+                      ["AWS/ApplicationELB", "HTTPCode_Target_5XX_Count", "LoadBalancer", "${LoadBalancerFullName}", "TargetGroup", "${TargetGroupFullName}"]
+                    ]
+                  }
+                },
+                {
+                  "type": "metric",
+                  "x": 16,
+                  "y": 0,
+                  "width": 8,
+                  "height": 6,
+                  "properties": {
+                    "title": "SLO Availability %",
+                    "region": "${AWS::Region}",
+                    "view": "timeSeries",
+                    "metrics": [
+                      ["AWS/ApplicationELB", "RequestCount", "LoadBalancer", "${LoadBalancerFullName}", {"id":"r"}],
+                      ["AWS/ApplicationELB", "HTTPCode_Target_5XX_Count", "LoadBalancer", "${LoadBalancerFullName}", "TargetGroup", "${TargetGroupFullName}", {"id":"e"}],
+                      [{"expression":"IF(r>0,100*(1-e/r),100)","label":"Availability %","id":"slo"}]
+                    ]
+                  }
+                },
+                {
+                  "type": "metric",
+                  "x": 0,
+                  "y": 6,
+                  "width": 12,
+                  "height": 6,
+                  "properties": {
+                    "title": "Latency p95 (s)",
+                    "region": "${AWS::Region}",
+                    "view": "timeSeries",
+                    "metrics": [
+                      ["AWS/ApplicationELB", "TargetResponseTime", "LoadBalancer", "${LoadBalancerFullName}", "TargetGroup", "${TargetGroupFullName}", {"stat":"p95"}]
+                    ]
+                  }
+                },
+                {
+                  "type": "metric",
+                  "x": 12,
+                  "y": 6,
+                  "width": 12,
+                  "height": 6,
+                  "properties": {
+                    "title": "Unhealthy Targets",
+                    "region": "${AWS::Region}",
+                    "view": "timeSeries",
+                    "metrics": [
+                      ["AWS/ApplicationELB", "UnHealthyHostCount", "LoadBalancer", "${LoadBalancerFullName}", "TargetGroup", "${TargetGroupFullName}"]
+                    ]
+                  }
+                }
+              ]
+            }
+          - LoadBalancerFullName:
+              Fn::ImportValue:
+                Fn::Sub: Mood-${EnvName}-LoadBalancerFullName
+            TargetGroupFullName:
+              Fn::ImportValue:
+                Fn::Sub: Mood-${EnvName}-TargetGroupFullName
+
+  NlbDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Condition: IsNlb
+    Properties:
+      DashboardName: !Sub mood-${EnvName}-nlb-dashboard
+      DashboardBody:
+        Fn::Sub:
+          - |
+            {
+              "widgets": [
+                {
+                  "type": "metric",
+                  "x": 0,
+                  "y": 0,
+                  "width": 12,
+                  "height": 6,
+                  "properties": {
+                    "title": "NLB Active Flow Count",
+                    "region": "${AWS::Region}",
+                    "view": "timeSeries",
+                    "metrics": [
+                      ["AWS/NetworkELB", "ActiveFlowCount", "LoadBalancer", "${NlbFullName}"]
+                    ]
+                  }
+                },
+                {
+                  "type": "metric",
+                  "x": 12,
+                  "y": 0,
+                  "width": 12,
+                  "height": 6,
+                  "properties": {
+                    "title": "NLB Processed Bytes",
+                    "region": "${AWS::Region}",
+                    "view": "timeSeries",
+                    "metrics": [
+                      ["AWS/NetworkELB", "ProcessedBytes", "LoadBalancer", "${NlbFullName}"]
+                    ]
+                  }
+                }
+              ]
+            }
+          - NlbFullName:
+              Fn::ImportValue:
+                Fn::Sub: Mood-${EnvName}-NlbFullName
+
+  Target5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsAlb
+    Properties:
+      AlarmName: !Sub mood-${EnvName}-target-5xx
+      AlarmDescription: Target 5xx responses crossed threshold.
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_Target_5XX_Count
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - UseAlerts
+        - - Fn::ImportValue:
+              Fn::Sub: Mood-${EnvName}-AlertTopicArn
+        - !Ref AWS::NoValue
+      Dimensions:
+        - Name: LoadBalancer
+          Value:
+            Fn::ImportValue:
+              Fn::Sub: Mood-${EnvName}-LoadBalancerFullName
+        - Name: TargetGroup
+          Value:
+            Fn::ImportValue:
+              Fn::Sub: Mood-${EnvName}-TargetGroupFullName
+
+  UnhealthyHostAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsAlb
+    Properties:
+      AlarmName: !Sub mood-${EnvName}-unhealthy-hosts
+      AlarmDescription: One or more targets are unhealthy.
+      Namespace: AWS/ApplicationELB
+      MetricName: UnHealthyHostCount
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - UseAlerts
+        - - Fn::ImportValue:
+              Fn::Sub: Mood-${EnvName}-AlertTopicArn
+        - !Ref AWS::NoValue
+      Dimensions:
+        - Name: LoadBalancer
+          Value:
+            Fn::ImportValue:
+              Fn::Sub: Mood-${EnvName}-LoadBalancerFullName
+        - Name: TargetGroup
+          Value:
+            Fn::ImportValue:
+              Fn::Sub: Mood-${EnvName}-TargetGroupFullName
+
+  SloAvailabilityAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsAlb
+    Properties:
+      AlarmName: !Sub mood-${EnvName}-slo-availability-low
+      AlarmDescription: SLO availability dropped below 99%.
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 99
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - UseAlerts
+        - - Fn::ImportValue:
+              Fn::Sub: Mood-${EnvName}-AlertTopicArn
+        - !Ref AWS::NoValue
+      Metrics:
+        - Id: req
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/ApplicationELB
+              MetricName: RequestCount
+              Dimensions:
+                - Name: LoadBalancer
+                  Value:
+                    Fn::ImportValue:
+                      Fn::Sub: Mood-${EnvName}-LoadBalancerFullName
+            Period: 60
+            Stat: Sum
+        - Id: err
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/ApplicationELB
+              MetricName: HTTPCode_Target_5XX_Count
+              Dimensions:
+                - Name: LoadBalancer
+                  Value:
+                    Fn::ImportValue:
+                      Fn::Sub: Mood-${EnvName}-LoadBalancerFullName
+                - Name: TargetGroup
+                  Value:
+                    Fn::ImportValue:
+                      Fn::Sub: Mood-${EnvName}-TargetGroupFullName
+            Period: 60
+            Stat: Sum
+        - Id: availability
+          Label: AvailabilityPercent
+          ReturnData: true
+          Expression: IF(req>0,100*(1-err/req),100)
+
+  LatencyP95Alarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsAlb
+    Properties:
+      AlarmName: !Sub mood-${EnvName}-p95-latency-high
+      AlarmDescription: p95 target response time above 0.75s.
+      Namespace: AWS/ApplicationELB
+      MetricName: TargetResponseTime
+      ExtendedStatistic: p95
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 0.75
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - UseAlerts
+        - - Fn::ImportValue:
+              Fn::Sub: Mood-${EnvName}-AlertTopicArn
+        - !Ref AWS::NoValue
+      Dimensions:
+        - Name: LoadBalancer
+          Value:
+            Fn::ImportValue:
+              Fn::Sub: Mood-${EnvName}-LoadBalancerFullName
+        - Name: TargetGroup
+          Value:
+            Fn::ImportValue:
+              Fn::Sub: Mood-${EnvName}-TargetGroupFullName
+
+Outputs:
+  DashboardName:
+    Value: !If
+      - IsAlb
+      - !Sub "mood-${EnvName}-alb-dashboard"
+      - !Sub "mood-${EnvName}-nlb-dashboard"

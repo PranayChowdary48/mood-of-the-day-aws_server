@@ -1,0 +1,795 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Core compute stack for Mood app.
+  Supports ALB/NLB, rolling/blue-green, public/private tasks, SSM/SecretsManager,
+  and Redis sidecar vs ElastiCache backend.
+
+Parameters:
+  EnvName:
+    Type: String
+    AllowedValues: [dev, prod]
+    Default: dev
+  ClusterBaseName:
+    Type: String
+    Default: mood
+  AppImageTag:
+    Type: String
+    Default: latest
+  InstanceType:
+    Type: String
+    Default: t3.micro
+  AsgMinSize:
+    Type: Number
+    Default: 1
+  AsgDesiredCapacity:
+    Type: Number
+    Default: 1
+  AsgMaxSize:
+    Type: Number
+    Default: 2
+  ServiceDesiredCount:
+    Type: Number
+    Default: 1
+  ServiceMinCount:
+    Type: Number
+    Default: 1
+  ServiceMaxCount:
+    Type: Number
+    Default: 2
+
+  TaskSubnetType:
+    Type: String
+    AllowedValues: [public, private]
+    Default: public
+  SecretBackend:
+    Type: String
+    AllowedValues: [ssm, secretsmanager]
+    Default: ssm
+  CacheBackend:
+    Type: String
+    AllowedValues: [sidecar, elasticache]
+    Default: sidecar
+  LoadBalancerType:
+    Type: String
+    AllowedValues: [alb, nlb]
+    Default: alb
+  DeploymentStrategy:
+    Type: String
+    AllowedValues: [rolling, bluegreen]
+    Default: rolling
+  EnableAsyncQueue:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+  EnableRds:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+  EnableEfs:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+  EnableKinesis:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+
+Conditions:
+  UsePrivateTasks: !Equals [!Ref TaskSubnetType, private]
+  UseSsm: !Equals [!Ref SecretBackend, ssm]
+  UseSecretsManager: !Equals [!Ref SecretBackend, secretsmanager]
+  UseSidecarRedis: !Equals [!Ref CacheBackend, sidecar]
+  UseElastiCache: !Equals [!Ref CacheBackend, elasticache]
+  IsAlb: !Equals [!Ref LoadBalancerType, alb]
+  IsNlb: !Equals [!Ref LoadBalancerType, nlb]
+  UseBlueGreenAlb: !And
+    - !Equals [!Ref DeploymentStrategy, bluegreen]
+    - !Equals [!Ref LoadBalancerType, alb]
+  UseAsyncQueue: !Equals [!Ref EnableAsyncQueue, "true"]
+  UseRds: !Equals [!Ref EnableRds, "true"]
+  UseEfs: !Equals [!Ref EnableEfs, "true"]
+  UseKinesis: !Equals [!Ref EnableKinesis, "true"]
+
+Resources:
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub ${ClusterBaseName}-${EnvName}
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+  EcsInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  EcsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref EcsInstanceRole]
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: ReadInjectedSecrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mood/${EnvName}/*
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                Resource: !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:mood/${EnvName}/*
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                Resource: "*"
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ReadConfigBackends
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mood/${EnvName}/*
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:mood/${EnvName}/*
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !Sub arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:mood-${EnvName}-*
+              - !If
+                - UseKinesis
+                - Effect: Allow
+                  Action:
+                    - kinesis:DescribeStream
+                    - kinesis:DescribeStreamSummary
+                    - kinesis:PutRecord
+                    - kinesis:PutRecords
+                  Resource:
+                    Fn::ImportValue:
+                      Fn::Sub: Mood-${EnvName}-KinesisStreamArn
+                - !Ref AWS::NoValue
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: IsAlb
+    Properties:
+      GroupDescription: ALB ingress from internet.
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: Mood-${EnvName}-VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  TaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: App task ingress from load balancer only.
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: Mood-${EnvName}-VpcId
+      SecurityGroupIngress:
+        - !If
+          - IsAlb
+          - IpProtocol: tcp
+            FromPort: 5000
+            ToPort: 5000
+            SourceSecurityGroupId: !Ref AlbSecurityGroup
+          - !Ref AWS::NoValue
+        - !If
+          - IsNlb
+          - IpProtocol: tcp
+            FromPort: 5000
+            ToPort: 5000
+            CidrIp: 0.0.0.0/0
+          - !Ref AWS::NoValue
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ECS container instance security group.
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: Mood-${EnvName}-VpcId
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  EcsLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Sub "{{resolve:ssm:/aws/service/ecs/optimized-ami/amazon-linux-2/recommended/image_id}}"
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Arn: !GetAtt EcsInstanceProfile.Arn
+        SecurityGroupIds: [!Ref InstanceSecurityGroup]
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            echo ECS_CLUSTER=${EcsCluster} >> /etc/ecs/ecs.config
+            echo ECS_ENABLE_TASK_IAM_ROLE=true >> /etc/ecs/ecs.config
+            echo ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=true >> /etc/ecs/ecs.config
+
+  ContainerAsg:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      MinSize: !Ref AsgMinSize
+      DesiredCapacity: !Ref AsgDesiredCapacity
+      MaxSize: !Ref AsgMaxSize
+      VPCZoneIdentifier:
+        - Fn::ImportValue:
+            Fn::Sub: Mood-${EnvName}-PublicSubnetAz1Id
+        - Fn::ImportValue:
+            Fn::Sub: Mood-${EnvName}-PublicSubnetAz2Id
+      LaunchTemplate:
+        LaunchTemplateId: !Ref EcsLaunchTemplate
+        Version: !GetAtt EcsLaunchTemplate.LatestVersionNumber
+      Tags:
+        - Key: Name
+          Value: !Sub mood-${EnvName}-ecs-instance
+          PropagateAtLaunch: true
+
+  CapacityProvider:
+    Type: AWS::ECS::CapacityProvider
+    Properties:
+      AutoScalingGroupProvider:
+        AutoScalingGroupArn: !Ref ContainerAsg
+        ManagedScaling:
+          Status: ENABLED
+          TargetCapacity: 100
+        ManagedTerminationProtection: DISABLED
+
+  ClusterCapacityProviderAssociation:
+    Type: AWS::ECS::ClusterCapacityProviderAssociations
+    Properties:
+      Cluster: !Ref EcsCluster
+      CapacityProviders: [!Ref CapacityProvider]
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: !Ref CapacityProvider
+          Base: 1
+          Weight: 1
+
+  AppLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /ecs/mood-${EnvName}
+      RetentionInDays: 7
+
+  AppLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Condition: IsAlb
+    Properties:
+      Name: !Sub mood-${EnvName}-alb
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - Fn::ImportValue:
+            Fn::Sub: Mood-${EnvName}-PublicSubnetAz1Id
+        - Fn::ImportValue:
+            Fn::Sub: Mood-${EnvName}-PublicSubnetAz2Id
+      SecurityGroups: [!Ref AlbSecurityGroup]
+
+  AlbBlueTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: IsAlb
+    Properties:
+      Name: !Sub mood-${EnvName}-alb-blue
+      Port: 5000
+      Protocol: HTTP
+      TargetType: ip
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: Mood-${EnvName}-VpcId
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      Matcher:
+        HttpCode: "200"
+
+  AlbGreenTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: UseBlueGreenAlb
+    Properties:
+      Name: !Sub mood-${EnvName}-alb-green
+      Port: 5000
+      Protocol: HTTP
+      TargetType: ip
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: Mood-${EnvName}-VpcId
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      Matcher:
+        HttpCode: "200"
+
+  AlbHttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: IsAlb
+    Properties:
+      LoadBalancerArn: !Ref AppLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref AlbBlueTargetGroup
+
+  AlbTestListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: UseBlueGreenAlb
+    Properties:
+      LoadBalancerArn: !Ref AppLoadBalancer
+      Port: 9002
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref AlbGreenTargetGroup
+
+  NlbLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Condition: IsNlb
+    Properties:
+      Name: !Sub mood-${EnvName}-nlb
+      Scheme: internet-facing
+      Type: network
+      Subnets:
+        - Fn::ImportValue:
+            Fn::Sub: Mood-${EnvName}-PublicSubnetAz1Id
+        - Fn::ImportValue:
+            Fn::Sub: Mood-${EnvName}-PublicSubnetAz2Id
+
+  NlbTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: IsNlb
+    Properties:
+      Name: !Sub mood-${EnvName}-nlb-tg
+      Port: 5000
+      Protocol: TCP
+      TargetType: ip
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: Mood-${EnvName}-VpcId
+      HealthCheckProtocol: TCP
+      HealthCheckPort: traffic-port
+
+  NlbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: IsNlb
+    Properties:
+      LoadBalancerArn: !Ref NlbLoadBalancer
+      Port: 80
+      Protocol: TCP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref NlbTargetGroup
+
+  AppTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub mood-app-${EnvName}
+      RequiresCompatibilities: [EC2]
+      NetworkMode: awsvpc
+      Cpu: "512"
+      Memory: "1024"
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: app
+          Image:
+            Fn::Sub:
+              - ${RepositoryUri}:${AppImageTag}
+              - RepositoryUri:
+                  Fn::ImportValue:
+                    Fn::Sub: Mood-${EnvName}-RepositoryUri
+          Essential: true
+          PortMappings:
+            - ContainerPort: 5000
+              Protocol: tcp
+          Environment:
+            - Name: SERVICE_NAME
+              Value: !Sub mood-${EnvName}
+            - Name: REDIS_HOST
+              Value: !If
+                - UseElastiCache
+                - Fn::ImportValue:
+                    Fn::Sub: Mood-${EnvName}-RedisPrimaryEndpoint
+                - 127.0.0.1
+            - Name: REDIS_PORT
+              Value: "6379"
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: KINESIS_ENABLED
+              Value: !If [UseKinesis, "true", "false"]
+            - !If
+              - UseKinesis
+              - Name: KINESIS_STREAM_NAME
+                Value:
+                  Fn::ImportValue:
+                    Fn::Sub: Mood-${EnvName}-KinesisStreamName
+              - !Ref AWS::NoValue
+            - Name: SQS_ASYNC_REFRESH
+              Value: !If [UseAsyncQueue, "true", "false"]
+            - Name: SQS_WORKER_ENABLED
+              Value: !If [UseAsyncQueue, "true", "false"]
+            - !If
+              - UseAsyncQueue
+              - Name: QUEUE_URL
+                Value:
+                  Fn::ImportValue:
+                    Fn::Sub: Mood-${EnvName}-QueueUrl
+              - !Ref AWS::NoValue
+            - !If
+              - UseRds
+              - Name: DB_HOST
+                Value:
+                  Fn::ImportValue:
+                    Fn::Sub: Mood-${EnvName}-DbHost
+              - !Ref AWS::NoValue
+            - !If
+              - UseRds
+              - Name: DB_PORT
+                Value:
+                  Fn::ImportValue:
+                    Fn::Sub: Mood-${EnvName}-DbPort
+              - !Ref AWS::NoValue
+            - !If
+              - UseRds
+              - Name: DB_NAME
+                Value:
+                  Fn::ImportValue:
+                    Fn::Sub: Mood-${EnvName}-DbName
+              - !Ref AWS::NoValue
+            - !If
+              - UseRds
+              - Name: DB_USER
+                Value:
+                  Fn::ImportValue:
+                    Fn::Sub: Mood-${EnvName}-DbUser
+              - !Ref AWS::NoValue
+          MountPoints:
+            - !If
+              - UseEfs
+              - ContainerPath: /mnt/shared
+                SourceVolume: shared-efs
+                ReadOnly: false
+              - !Ref AWS::NoValue
+          Secrets:
+            - !If
+              - UseSsm
+              - Name: REFRESH_USER
+                ValueFrom:
+                  Fn::ImportValue:
+                    Fn::Sub: Mood-${EnvName}-RefreshUserParameterName
+              - !Ref AWS::NoValue
+            - !If
+              - UseSsm
+              - Name: REFRESH_PASSWORD
+                ValueFrom:
+                  Fn::ImportValue:
+                    Fn::Sub: Mood-${EnvName}-RefreshPasswordParameterName
+              - !Ref AWS::NoValue
+            - !If
+              - UseSecretsManager
+              - Name: REFRESH_USER
+                ValueFrom: !Sub
+                  - "${SecretArn}:refresh_user::"
+                  - SecretArn:
+                      Fn::ImportValue:
+                        Fn::Sub: Mood-${EnvName}-RefreshAuthSecretArn
+              - !Ref AWS::NoValue
+            - !If
+              - UseSecretsManager
+              - Name: REFRESH_PASSWORD
+                ValueFrom: !Sub
+                  - "${SecretArn}:refresh_password::"
+                  - SecretArn:
+                      Fn::ImportValue:
+                        Fn::Sub: Mood-${EnvName}-RefreshAuthSecretArn
+              - !Ref AWS::NoValue
+            - !If
+              - UseRds
+              - Name: DB_PASSWORD
+                ValueFrom: !Sub
+                  - "${DbSecretArn}:password::"
+                  - DbSecretArn:
+                      Fn::ImportValue:
+                        Fn::Sub: Mood-${EnvName}-DbSecretArn
+              - !Ref AWS::NoValue
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref AppLogGroup
+              awslogs-stream-prefix: app
+
+        - !If
+          - UseSidecarRedis
+          - Name: redis
+            Image: public.ecr.aws/docker/library/redis:7-alpine
+            Essential: true
+            PortMappings:
+              - ContainerPort: 6379
+                Protocol: tcp
+            MemoryReservation: 128
+            LogConfiguration:
+              LogDriver: awslogs
+              Options:
+                awslogs-region: !Ref AWS::Region
+                awslogs-group: !Ref AppLogGroup
+                awslogs-stream-prefix: redis
+          - !Ref AWS::NoValue
+      Volumes:
+        - !If
+          - UseEfs
+          - Name: shared-efs
+            EFSVolumeConfiguration:
+              FilesystemId:
+                Fn::ImportValue:
+                  Fn::Sub: Mood-${EnvName}-EfsFileSystemId
+              TransitEncryption: ENABLED
+              AuthorizationConfig:
+                AccessPointId:
+                  Fn::ImportValue:
+                    Fn::Sub: Mood-${EnvName}-EfsAccessPointId
+                IAM: DISABLED
+          - !Ref AWS::NoValue
+
+  AppService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - ClusterCapacityProviderAssociation
+    Properties:
+      ServiceName: !Sub mood-app-${EnvName}
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref AppTaskDefinition
+      LaunchType: EC2
+      DesiredCount: !Ref ServiceDesiredCount
+      DeploymentController:
+        Type: !If [UseBlueGreenAlb, CODE_DEPLOY, ECS]
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 0
+        MaximumPercent: 100
+        DeploymentCircuitBreaker:
+          Enable: !If [UseBlueGreenAlb, false, true]
+          Rollback: !If [UseBlueGreenAlb, false, true]
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: !If [UsePrivateTasks, DISABLED, ENABLED]
+          SecurityGroups: [!Ref TaskSecurityGroup]
+          Subnets: !If
+            - UsePrivateTasks
+            - - Fn::ImportValue:
+                  Fn::Sub: Mood-${EnvName}-PrivateSubnetAz1Id
+              - Fn::ImportValue:
+                  Fn::Sub: Mood-${EnvName}-PrivateSubnetAz2Id
+            - - Fn::ImportValue:
+                  Fn::Sub: Mood-${EnvName}-PublicSubnetAz1Id
+              - Fn::ImportValue:
+                  Fn::Sub: Mood-${EnvName}-PublicSubnetAz2Id
+      LoadBalancers:
+        - TargetGroupArn: !If [IsAlb, !Ref AlbBlueTargetGroup, !Ref NlbTargetGroup]
+          ContainerName: app
+          ContainerPort: 5000
+
+  CodeDeployEcsRole:
+    Type: AWS::IAM::Role
+    Condition: UseBlueGreenAlb
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codedeploy.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSCodeDeployRoleForECS
+
+  CodeDeployApplication:
+    Type: AWS::CodeDeploy::Application
+    Condition: UseBlueGreenAlb
+    Properties:
+      ApplicationName: !Sub mood-${EnvName}-codedeploy
+      ComputePlatform: ECS
+
+  CodeDeployDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    Condition: UseBlueGreenAlb
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub mood-${EnvName}-bluegreen
+      ServiceRoleArn: !GetAtt CodeDeployEcsRole.Arn
+      DeploymentConfigName: CodeDeployDefault.ECSAllAtOnce
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      BlueGreenDeploymentConfiguration:
+        DeploymentReadyOption:
+          ActionOnTimeout: CONTINUE_DEPLOYMENT
+          WaitTimeInMinutes: 0
+        TerminateBlueInstancesOnDeploymentSuccess:
+          Action: TERMINATE
+          TerminationWaitTimeInMinutes: 5
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events: [DEPLOYMENT_FAILURE]
+      LoadBalancerInfo:
+        TargetGroupPairInfoList:
+          - TargetGroups:
+              - Name: !GetAtt AlbBlueTargetGroup.TargetGroupName
+              - Name: !GetAtt AlbGreenTargetGroup.TargetGroupName
+            ProdTrafficRoute:
+              ListenerArns: [!Ref AlbHttpListener]
+            TestTrafficRoute:
+              ListenerArns: [!Ref AlbTestListener]
+      ECSServices:
+        - ClusterName: !Sub ${ClusterBaseName}-${EnvName}
+          ServiceName: !GetAtt AppService.Name
+
+  AppScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    DependsOn: AppService
+    Properties:
+      MinCapacity: !Ref ServiceMinCount
+      MaxCapacity: !Ref ServiceMaxCount
+      ResourceId: !Sub service/${ClusterBaseName}-${EnvName}/${AppService.Name}
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+
+  CpuTargetTrackingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub mood-${EnvName}-cpu-scaling
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref AppScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 70
+        ScaleInCooldown: 120
+        ScaleOutCooldown: 60
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+
+  AlbRequestTargetTrackingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Condition: IsAlb
+    Properties:
+      PolicyName: !Sub mood-${EnvName}-alb-rps-scaling
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref AppScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 200
+        ScaleInCooldown: 120
+        ScaleOutCooldown: 60
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ALBRequestCountPerTarget
+          ResourceLabel: !Join
+            - "/"
+            - - !GetAtt AppLoadBalancer.LoadBalancerFullName
+              - !GetAtt AlbBlueTargetGroup.TargetGroupFullName
+
+Outputs:
+  ClusterName:
+    Value: !Sub ${ClusterBaseName}-${EnvName}
+    Export:
+      Name: !Sub Mood-${EnvName}-ClusterName
+
+  ServiceName:
+    Value: !GetAtt AppService.Name
+    Export:
+      Name: !Sub Mood-${EnvName}-ServiceName
+
+  LoadBalancerType:
+    Value: !Ref LoadBalancerType
+    Export:
+      Name: !Sub Mood-${EnvName}-LoadBalancerType
+
+  LoadBalancerDnsName:
+    Value: !If [IsAlb, !GetAtt AppLoadBalancer.DNSName, !GetAtt NlbLoadBalancer.DNSName]
+    Export:
+      Name: !Sub Mood-${EnvName}-LoadBalancerDnsName
+
+  AlbArn:
+    Condition: IsAlb
+    Value: !Ref AppLoadBalancer
+    Export:
+      Name: !Sub Mood-${EnvName}-AlbArn
+
+  LoadBalancerFullName:
+    Condition: IsAlb
+    Value: !GetAtt AppLoadBalancer.LoadBalancerFullName
+    Export:
+      Name: !Sub Mood-${EnvName}-LoadBalancerFullName
+
+  TargetGroupFullName:
+    Condition: IsAlb
+    Value: !GetAtt AlbBlueTargetGroup.TargetGroupFullName
+    Export:
+      Name: !Sub Mood-${EnvName}-TargetGroupFullName
+
+  AlbTargetGroupArn:
+    Condition: IsAlb
+    Value: !Ref AlbBlueTargetGroup
+    Export:
+      Name: !Sub Mood-${EnvName}-AlbTargetGroupArn
+
+  AlbCanonicalHostedZoneId:
+    Condition: IsAlb
+    Value: !GetAtt AppLoadBalancer.CanonicalHostedZoneID
+    Export:
+      Name: !Sub Mood-${EnvName}-AlbCanonicalHostedZoneId
+
+  NlbArn:
+    Condition: IsNlb
+    Value: !Ref NlbLoadBalancer
+    Export:
+      Name: !Sub Mood-${EnvName}-NlbArn
+
+  NlbFullName:
+    Condition: IsNlb
+    Value: !GetAtt NlbLoadBalancer.LoadBalancerFullName
+    Export:
+      Name: !Sub Mood-${EnvName}-NlbFullName
+
+  TaskSecurityGroupId:
+    Value: !Ref TaskSecurityGroup
+    Export:
+      Name: !Sub Mood-${EnvName}-TaskSecurityGroupId
+  AsgName:
+    Value: !Ref ContainerAsg
+    Export:
+      Name: !Sub Mood-${EnvName}-AsgName

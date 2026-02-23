@@ -1,0 +1,85 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Optional EFS module for shared filesystem across ECS tasks.
+
+Parameters:
+  EnvName:
+    Type: String
+    AllowedValues: [dev, prod]
+    Default: dev
+  PerformanceMode:
+    Type: String
+    AllowedValues: [generalPurpose, maxIO]
+    Default: generalPurpose
+
+Resources:
+  EfsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow NFS from VPC CIDR.
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: Mood-${EnvName}-VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          CidrIp:
+            Fn::ImportValue:
+              Fn::Sub: Mood-${EnvName}-VpcCidr
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  SharedFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true
+      PerformanceMode: !Ref PerformanceMode
+      FileSystemTags:
+        - Key: Name
+          Value: !Sub mood-${EnvName}-efs
+      LifecyclePolicies:
+        - TransitionToIA: AFTER_30_DAYS
+
+  MountTargetAz1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref SharedFileSystem
+      SubnetId:
+        Fn::ImportValue:
+          Fn::Sub: Mood-${EnvName}-PrivateSubnetAz1Id
+      SecurityGroups: [!Ref EfsSecurityGroup]
+
+  MountTargetAz2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref SharedFileSystem
+      SubnetId:
+        Fn::ImportValue:
+          Fn::Sub: Mood-${EnvName}-PrivateSubnetAz2Id
+      SecurityGroups: [!Ref EfsSecurityGroup]
+
+  AppAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref SharedFileSystem
+      PosixUser:
+        Uid: "1000"
+        Gid: "1000"
+      RootDirectory:
+        Path: /shared
+        CreationInfo:
+          OwnerUid: "1000"
+          OwnerGid: "1000"
+          Permissions: "0775"
+
+Outputs:
+  EfsFileSystemId:
+    Value: !Ref SharedFileSystem
+    Export:
+      Name: !Sub Mood-${EnvName}-EfsFileSystemId
+
+  EfsAccessPointId:
+    Value: !Ref AppAccessPoint
+    Export:
+      Name: !Sub Mood-${EnvName}-EfsAccessPointId

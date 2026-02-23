@@ -1,0 +1,19 @@
+{
+  "EnvName": "prod",
+  "VpcCidr": "10.50.0.0/16",
+  "PublicSubnet1Cidr": "10.50.1.0/24",
+  "PublicSubnet2Cidr": "10.50.2.0/24",
+  "PrivateSubnet1Cidr": "10.50.11.0/24",
+  "PrivateSubnet2Cidr": "10.50.12.0/24",
+  "ClusterBaseName": "mood",
+  "AppImageTag": "latest",
+  "InstanceType": "t3.small",
+  "AsgMinSize": 1,
+  "AsgDesiredCapacity": 2,
+  "AsgMaxSize": 4,
+  "ServiceDesiredCount": 2,
+  "ServiceMinCount": 2,
+  "ServiceMaxCount": 5,
+  "RefreshUser": "mood",
+  "RefreshPassword": "mood"
+}

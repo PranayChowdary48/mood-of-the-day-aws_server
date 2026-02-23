@@ -1,0 +1,6 @@
+flask
+redis
+python-json-logger
+prometheus_client
+boto3
+psycopg2-binary

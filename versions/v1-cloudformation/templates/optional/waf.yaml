@@ -1,0 +1,115 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Optional WAFv2 module for ALB rate limiting, managed protection, and alarms.
+
+Parameters:
+  EnvName:
+    Type: String
+    AllowedValues: [dev, prod]
+    Default: dev
+  RateLimitPer5Min:
+    Type: Number
+    Default: 2000
+    Description: Requests allowed per source IP in a 5-minute window.
+  BlockedRequestsAlarmThreshold:
+    Type: Number
+    Default: 50
+    Description: Alarm threshold for total blocked requests per minute.
+  RateLimitAlarmThreshold:
+    Type: Number
+    Default: 20
+    Description: Alarm threshold for blocked requests from ip-rate-limit rule.
+
+Resources:
+  MoodWebAcl:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub mood-${EnvName}-webacl
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub mood-${EnvName}-webacl
+        SampledRequestsEnabled: true
+      Rules:
+        - Name: aws-managed-common
+          Priority: 1
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub mood-${EnvName}-managed-common
+            SampledRequestsEnabled: true
+
+        - Name: ip-rate-limit
+          Priority: 2
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              AggregateKeyType: IP
+              Limit: !Ref RateLimitPer5Min
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub mood-${EnvName}-rate-limit
+            SampledRequestsEnabled: true
+
+  WebAclAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Properties:
+      ResourceArn:
+        Fn::ImportValue:
+          Fn::Sub: Mood-${EnvName}-AlbArn
+      WebACLArn: !GetAtt MoodWebAcl.Arn
+
+  WafBlockedRequestsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub mood-${EnvName}-waf-blocked-requests
+      AlarmDescription: Total WAF blocked requests exceeded threshold.
+      Namespace: AWS/WAFV2
+      MetricName: BlockedRequests
+      Dimensions:
+        - Name: WebACL
+          Value: !Sub mood-${EnvName}-webacl
+        - Name: Rule
+          Value: ALL
+        - Name: Region
+          Value: !Ref AWS::Region
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: !Ref BlockedRequestsAlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  WafRateLimitRuleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub mood-${EnvName}-waf-rate-limit-hits
+      AlarmDescription: WAF IP rate-limit rule is actively blocking requests.
+      Namespace: AWS/WAFV2
+      MetricName: BlockedRequests
+      Dimensions:
+        - Name: WebACL
+          Value: !Sub mood-${EnvName}-webacl
+        - Name: Rule
+          Value: ip-rate-limit
+        - Name: Region
+          Value: !Ref AWS::Region
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: !Ref RateLimitAlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+  WebAclArn:
+    Value: !GetAtt MoodWebAcl.Arn

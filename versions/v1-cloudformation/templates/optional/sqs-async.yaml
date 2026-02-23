@@ -1,0 +1,59 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Optional SQS async processing module with DLQ.
+
+Parameters:
+  EnvName:
+    Type: String
+    AllowedValues: [dev, prod]
+    Default: dev
+
+Resources:
+  RefreshDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub mood-${EnvName}-refresh-dlq
+      MessageRetentionPeriod: 1209600
+
+  RefreshQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub mood-${EnvName}-refresh
+      VisibilityTimeout: 30
+      ReceiveMessageWaitTimeSeconds: 20
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt RefreshDlq.Arn
+        maxReceiveCount: 3
+
+  DlqDepthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub mood-${EnvName}-refresh-dlq-depth
+      AlarmDescription: Messages are accumulating in refresh DLQ.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt RefreshDlq.QueueName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+  QueueUrl:
+    Value: !Ref RefreshQueue
+    Export:
+      Name: !Sub Mood-${EnvName}-QueueUrl
+
+  QueueArn:
+    Value: !GetAtt RefreshQueue.Arn
+    Export:
+      Name: !Sub Mood-${EnvName}-QueueArn
+
+  DlqUrl:
+    Value: !Ref RefreshDlq
+    Export:
+      Name: !Sub Mood-${EnvName}-DlqUrl

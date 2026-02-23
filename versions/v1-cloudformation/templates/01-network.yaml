@@ -1,0 +1,342 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Mood app networking foundation.
+  Includes public and private subnets across 2 AZs, plus optional VPC endpoints.
+
+Parameters:
+  EnvName:
+    Type: String
+    AllowedValues: [dev, prod]
+    Default: dev
+  VpcCidr:
+    Type: String
+    Default: 10.40.0.0/16
+  PublicSubnet1Cidr:
+    Type: String
+    Default: 10.40.1.0/24
+  PublicSubnet2Cidr:
+    Type: String
+    Default: 10.40.2.0/24
+  PrivateSubnet1Cidr:
+    Type: String
+    Default: 10.40.11.0/24
+  PrivateSubnet2Cidr:
+    Type: String
+    Default: 10.40.12.0/24
+  EnableVpcEndpoints:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+  EnableNatGateway:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+
+Conditions:
+  UseVpcEndpoints: !Equals [!Ref EnableVpcEndpoints, "true"]
+  UseNatGateway: !Equals [!Ref EnableNatGateway, "true"]
+
+Resources:
+  MoodVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub mood-${EnvName}-vpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub mood-${EnvName}-igw
+
+  VpcIgwAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref MoodVpc
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MoodVpc
+      Tags:
+        - Key: Name
+          Value: !Sub mood-${EnvName}-public-rt
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VpcIgwAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MoodVpc
+      Tags:
+        - Key: Name
+          Value: !Sub mood-${EnvName}-private-rt
+
+  PublicSubnetAz1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MoodVpc
+      CidrBlock: !Ref PublicSubnet1Cidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub mood-${EnvName}-public-a
+
+  PublicSubnetAz2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MoodVpc
+      CidrBlock: !Ref PublicSubnet2Cidr
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub mood-${EnvName}-public-b
+
+  PrivateSubnetAz1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MoodVpc
+      CidrBlock: !Ref PrivateSubnet1Cidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub mood-${EnvName}-private-a
+
+  PrivateSubnetAz2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MoodVpc
+      CidrBlock: !Ref PrivateSubnet2Cidr
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub mood-${EnvName}-private-b
+
+  NatElasticIp:
+    Type: AWS::EC2::EIP
+    Condition: UseNatGateway
+    DependsOn: VpcIgwAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Condition: UseNatGateway
+    Properties:
+      AllocationId: !GetAtt NatElasticIp.AllocationId
+      SubnetId: !Ref PublicSubnetAz1
+
+  PrivateDefaultRoute:
+    Type: AWS::EC2::Route
+    Condition: UseNatGateway
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PublicSubnetAz1RouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetAz1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetAz2RouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetAz2
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateSubnetAz1RouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetAz1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetAz2RouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetAz2
+      RouteTableId: !Ref PrivateRouteTable
+
+  VpcEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: UseVpcEndpoints
+    Properties:
+      GroupDescription: Allow VPC-internal HTTPS to interface endpoints.
+      VpcId: !Ref MoodVpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref VpcCidr
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: UseVpcEndpoints
+    Properties:
+      VpcId: !Ref MoodVpc
+      VpcEndpointType: Gateway
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      RouteTableIds:
+        - !Ref PublicRouteTable
+        - !Ref PrivateRouteTable
+
+  EcrApiEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: UseVpcEndpoints
+    Properties:
+      VpcId: !Ref MoodVpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ecr.api
+      PrivateDnsEnabled: true
+      SecurityGroupIds: [!Ref VpcEndpointSecurityGroup]
+      SubnetIds: [!Ref PrivateSubnetAz1, !Ref PrivateSubnetAz2]
+
+  EcrDkrEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: UseVpcEndpoints
+    Properties:
+      VpcId: !Ref MoodVpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ecr.dkr
+      PrivateDnsEnabled: true
+      SecurityGroupIds: [!Ref VpcEndpointSecurityGroup]
+      SubnetIds: [!Ref PrivateSubnetAz1, !Ref PrivateSubnetAz2]
+
+  LogsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: UseVpcEndpoints
+    Properties:
+      VpcId: !Ref MoodVpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.logs
+      PrivateDnsEnabled: true
+      SecurityGroupIds: [!Ref VpcEndpointSecurityGroup]
+      SubnetIds: [!Ref PrivateSubnetAz1, !Ref PrivateSubnetAz2]
+
+  SecretsManagerEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: UseVpcEndpoints
+    Properties:
+      VpcId: !Ref MoodVpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.secretsmanager
+      PrivateDnsEnabled: true
+      SecurityGroupIds: [!Ref VpcEndpointSecurityGroup]
+      SubnetIds: [!Ref PrivateSubnetAz1, !Ref PrivateSubnetAz2]
+
+  SsmEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: UseVpcEndpoints
+    Properties:
+      VpcId: !Ref MoodVpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ssm
+      PrivateDnsEnabled: true
+      SecurityGroupIds: [!Ref VpcEndpointSecurityGroup]
+      SubnetIds: [!Ref PrivateSubnetAz1, !Ref PrivateSubnetAz2]
+
+  SsmmessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: UseVpcEndpoints
+    Properties:
+      VpcId: !Ref MoodVpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ssmmessages
+      PrivateDnsEnabled: true
+      SecurityGroupIds: [!Ref VpcEndpointSecurityGroup]
+      SubnetIds: [!Ref PrivateSubnetAz1, !Ref PrivateSubnetAz2]
+
+  Ec2messagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: UseVpcEndpoints
+    Properties:
+      VpcId: !Ref MoodVpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ec2messages
+      PrivateDnsEnabled: true
+      SecurityGroupIds: [!Ref VpcEndpointSecurityGroup]
+      SubnetIds: [!Ref PrivateSubnetAz1, !Ref PrivateSubnetAz2]
+
+  EcsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: UseVpcEndpoints
+    Properties:
+      VpcId: !Ref MoodVpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ecs
+      PrivateDnsEnabled: true
+      SecurityGroupIds: [!Ref VpcEndpointSecurityGroup]
+      SubnetIds: [!Ref PrivateSubnetAz1, !Ref PrivateSubnetAz2]
+
+  EcsAgentEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: UseVpcEndpoints
+    Properties:
+      VpcId: !Ref MoodVpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ecs-agent
+      PrivateDnsEnabled: true
+      SecurityGroupIds: [!Ref VpcEndpointSecurityGroup]
+      SubnetIds: [!Ref PrivateSubnetAz1, !Ref PrivateSubnetAz2]
+
+  EcsTelemetryEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: UseVpcEndpoints
+    Properties:
+      VpcId: !Ref MoodVpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ecs-telemetry
+      PrivateDnsEnabled: true
+      SecurityGroupIds: [!Ref VpcEndpointSecurityGroup]
+      SubnetIds: [!Ref PrivateSubnetAz1, !Ref PrivateSubnetAz2]
+
+Outputs:
+  VpcId:
+    Value: !Ref MoodVpc
+    Export:
+      Name: !Sub Mood-${EnvName}-VpcId
+
+  VpcCidr:
+    Value: !Ref VpcCidr
+    Export:
+      Name: !Sub Mood-${EnvName}-VpcCidr
+
+  PublicSubnetAz1Id:
+    Value: !Ref PublicSubnetAz1
+    Export:
+      Name: !Sub Mood-${EnvName}-PublicSubnetAz1Id
+
+  PublicSubnetAz2Id:
+    Value: !Ref PublicSubnetAz2
+    Export:
+      Name: !Sub Mood-${EnvName}-PublicSubnetAz2Id
+
+  PrivateSubnetAz1Id:
+    Value: !Ref PrivateSubnetAz1
+    Export:
+      Name: !Sub Mood-${EnvName}-PrivateSubnetAz1Id
+
+  PrivateSubnetAz2Id:
+    Value: !Ref PrivateSubnetAz2
+    Export:
+      Name: !Sub Mood-${EnvName}-PrivateSubnetAz2Id

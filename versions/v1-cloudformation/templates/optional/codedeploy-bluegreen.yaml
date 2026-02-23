@@ -1,0 +1,20 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Placeholder module documenting a future ECS Blue/Green rollout path with CodeDeploy.
+  This template intentionally creates only metadata outputs.
+
+Parameters:
+  EnvName:
+    Type: String
+    AllowedValues: [dev, prod]
+    Default: dev
+
+Resources:
+  TemplateMarker:
+    Type: AWS::CloudFormation::WaitConditionHandle
+
+Outputs:
+  BlueGreenGuidance:
+    Value: >-
+      Implement AWS::CodeDeploy::Application + DeploymentGroup for ECS and wire
+      dual target groups + lifecycle hooks. Kept as next-step module.

@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Mood of the Day</title>
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            background-color: #f5f5f5;
+            margin: 0;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 20px;
+        }
+
+        .gif-container {
+            position: relative;
+            display: inline-block;
+        }
+
+        .gif-container img {
+            max-width: 90%;
+            border-radius: 12px;
+        }
+
+        .refresh-btn {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+
+            width: 64px;
+            height: 64px;
+
+            display: none;
+            align-items: center;
+            justify-content: center;
+
+            font-size: 32px;
+            color: rgba(255, 255, 255, 0.75);
+
+            background: rgba(255, 255, 255, 0.15);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            border-radius: 14px;
+
+            cursor: pointer;
+            transition: all 0.2s ease-in-out;
+        }
+
+        .refresh-btn:hover {
+            color: rgba(255, 255, 255, 0.95);
+            transform: translate(-50%, -50%) scale(1.08);
+        }
+
+
+        .gif-container:hover .refresh-btn {
+            display: flex;
+        }
+
+        .meta-info {
+            position: fixed;
+            bottom: 12px;
+            right: 12px;
+            font-size: 12px;
+            color: #555;
+            text-align: right;
+            background: rgba(255, 255, 255, 0.6);
+            backdrop-filter: blur(6px);
+            padding: 8px 10px;
+            border-radius: 8px;
+        }
+
+
+        footer {
+            margin-top: 30px;
+            font-size: 18px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+
+<body>
+
+    <h1 id="mood-title">Mood of the Day: {{ mood }}</h1>
+
+    <div class="gif-container">
+        <img id="mood-gif" src="{{ gif }}" alt="{{ mood }} gif">
+        <div class="refresh-btn" onclick="refreshMood()">⟳</div>
+    </div>
+
+    <footer>
+        ROCK your attitude any day of the week 🤘
+    </footer>
+
+    <div class="meta-info">
+        <div><strong>Generated at:</strong> <span id="generated-at">{{ generated_at }}</span></div>
+        <div style="margin-top: 4px;"><strong>Running on:</strong> <span id="hostname">{{ hostname }}</span></div>
+    </div>
+
+    <script>
+        async function refreshMood() {
+            try {
+                const response = await fetch("/refresh", {
+                    method: "POST"
+                });
+
+                const data = await response.json();
+
+                document.getElementById("mood-title").innerText = "Mood of the Day: " + data.mood;
+
+                document.getElementById("mood-gif").src = data.gif;
+                document.getElementById("generated-at").innerText = data.generated_at;
+                document.getElementById("hostname").innerText = data.hostname;
+            } catch (err) {
+                console.error("Failed to refresh mood", err);
+            }
+        }
+    </script>
+
+</body>
+
+</html>

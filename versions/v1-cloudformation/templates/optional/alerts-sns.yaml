@@ -1,0 +1,34 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Optional SNS topic for alarm notifications.
+
+Parameters:
+  EnvName:
+    Type: String
+    AllowedValues: [dev, prod]
+    Default: dev
+  AlertEmail:
+    Type: String
+    Default: ""
+
+Conditions:
+  HasEmail: !Not [!Equals [!Ref AlertEmail, ""]]
+
+Resources:
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub mood-${EnvName}-alarms
+
+  AlarmTopicSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasEmail
+    Properties:
+      TopicArn: !Ref AlarmTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+Outputs:
+  AlertTopicArn:
+    Value: !Ref AlarmTopic
+    Export:
+      Name: !Sub Mood-${EnvName}-AlertTopicArn

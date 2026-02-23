@@ -1,0 +1,49 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Optional Kinesis stream module for mood event streaming.
+
+Parameters:
+  EnvName:
+    Type: String
+    AllowedValues: [dev, prod]
+    Default: dev
+  RetentionHours:
+    Type: Number
+    Default: 24
+    MinValue: 24
+    MaxValue: 8760
+
+Resources:
+  MoodEventStream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      RetentionPeriodHours: !Ref RetentionHours
+      StreamModeDetails:
+        StreamMode: ON_DEMAND
+
+  IncomingRecordsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub mood-${EnvName}-kinesis-incoming-records
+      AlarmDescription: Kinesis stream has incoming records (sanity indicator).
+      Namespace: AWS/Kinesis
+      MetricName: IncomingRecords
+      Dimensions:
+        - Name: StreamName
+          Value: !Ref MoodEventStream
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+Outputs:
+  KinesisStreamName:
+    Value: !Ref MoodEventStream
+    Export:
+      Name: !Sub Mood-${EnvName}-KinesisStreamName
+
+  KinesisStreamArn:
+    Value: !GetAtt MoodEventStream.Arn
+    Export:
+      Name: !Sub Mood-${EnvName}-KinesisStreamArn

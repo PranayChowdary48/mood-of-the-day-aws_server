@@ -1,0 +1,72 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  App config/auth backend.
+  Supports either SSM Parameter Store or Secrets Manager.
+
+Parameters:
+  EnvName:
+    Type: String
+    AllowedValues: [dev, prod]
+    Default: dev
+  SecretBackend:
+    Type: String
+    AllowedValues: [ssm, secretsmanager]
+    Default: ssm
+  RefreshUser:
+    Type: String
+    Default: mood
+  RefreshPassword:
+    Type: String
+    NoEcho: true
+    Default: mood
+
+Conditions:
+  UseSsm: !Equals [!Ref SecretBackend, ssm]
+  UseSecretsManager: !Equals [!Ref SecretBackend, secretsmanager]
+
+Resources:
+  RefreshUserParameter:
+    Type: AWS::SSM::Parameter
+    Condition: UseSsm
+    Properties:
+      Name: !Sub /mood/${EnvName}/refresh_user
+      Type: String
+      Value: !Ref RefreshUser
+      Tier: Standard
+
+  RefreshPasswordParameter:
+    Type: AWS::SSM::Parameter
+    Condition: UseSsm
+    Properties:
+      Name: !Sub /mood/${EnvName}/refresh_password
+      Type: String
+      Value: !Ref RefreshPassword
+      Tier: Standard
+
+  RefreshAuthSecret:
+    Type: AWS::SecretsManager::Secret
+    Condition: UseSecretsManager
+    Properties:
+      Name: !Sub mood/${EnvName}/refresh-auth
+      Description: Basic auth credentials for POST /refresh endpoint.
+      SecretString: !Sub |
+        {"refresh_user":"${RefreshUser}","refresh_password":"${RefreshPassword}"}
+
+Outputs:
+  RefreshUserParameterName:
+    Condition: UseSsm
+    Value: !Ref RefreshUserParameter
+    Export:
+      Name: !Sub Mood-${EnvName}-RefreshUserParameterName
+
+  RefreshPasswordParameterName:
+    Condition: UseSsm
+    Value: !Ref RefreshPasswordParameter
+    Export:
+      Name: !Sub Mood-${EnvName}-RefreshPasswordParameterName
+
+  RefreshAuthSecretArn:
+    Condition: UseSecretsManager
+    Value: !Ref RefreshAuthSecret
+    Export:
+      Name: !Sub Mood-${EnvName}-RefreshAuthSecretArn

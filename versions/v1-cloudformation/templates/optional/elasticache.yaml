@@ -1,0 +1,66 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Optional ElastiCache Redis replication group.
+
+Parameters:
+  EnvName:
+    Type: String
+    AllowedValues: [dev, prod]
+    Default: dev
+  NodeType:
+    Type: String
+    Default: cache.t4g.micro
+  NumCacheClusters:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 6
+
+Resources:
+  RedisSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow Redis traffic from VPC CIDR.
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: Mood-${EnvName}-VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 6379
+          ToPort: 6379
+          CidrIp:
+            Fn::ImportValue:
+              Fn::Sub: Mood-${EnvName}-VpcCidr
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  RedisSubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      Description: !Sub mood-${EnvName} redis subnet group
+      SubnetIds:
+        - Fn::ImportValue:
+            Fn::Sub: Mood-${EnvName}-PrivateSubnetAz1Id
+        - Fn::ImportValue:
+            Fn::Sub: Mood-${EnvName}-PrivateSubnetAz2Id
+
+  RedisReplicationGroup:
+    Type: AWS::ElastiCache::ReplicationGroup
+    Properties:
+      ReplicationGroupDescription: !Sub mood-${EnvName}-redis
+      Engine: redis
+      EngineVersion: "7.1"
+      CacheNodeType: !Ref NodeType
+      NumCacheClusters: !Ref NumCacheClusters
+      AutomaticFailoverEnabled: false
+      CacheSubnetGroupName: !Ref RedisSubnetGroup
+      SecurityGroupIds: [!Ref RedisSecurityGroup]
+      AutoMinorVersionUpgrade: true
+      TransitEncryptionEnabled: false
+      AtRestEncryptionEnabled: false
+
+Outputs:
+  RedisPrimaryEndpoint:
+    Value: !GetAtt RedisReplicationGroup.PrimaryEndPoint.Address
+    Export:
+      Name: !Sub Mood-${EnvName}-RedisPrimaryEndpoint
