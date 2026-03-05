@@ -1,0 +1,99 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Optional Cognito User Pool + Hosted UI for Mood app login.
+
+Parameters:
+  EnvName:
+    Type: String
+    AllowedValues: [dev, prod]
+    Default: dev
+  CognitoDomainPrefix:
+    Type: String
+    Default: mood-dev-auth
+    Description: Globally unique Cognito hosted UI domain prefix.
+  CallbackUrl:
+    Type: String
+    Default: https://example.com/oauth2/idpresponse
+    Description: Allowed callback URL for ALB authenticate-cognito redirect.
+  LogoutUrl:
+    Type: String
+    Default: https://example.com/
+    Description: Allowed logout URL for Hosted UI.
+
+Resources:
+  MoodUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub mood-${EnvName}-users
+      AutoVerifiedAttributes: [email]
+      UsernameAttributes: [email]
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 10
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+          TemporaryPasswordValidityDays: 7
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+
+  MoodUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref MoodUserPool
+      ClientName: !Sub mood-${EnvName}-web
+      GenerateSecret: true
+      PreventUserExistenceErrors: ENABLED
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: hours
+        IdToken: hours
+        RefreshToken: days
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - openid
+        - email
+        - profile
+      CallbackURLs:
+        - !Ref CallbackUrl
+      LogoutURLs:
+        - !Ref LogoutUrl
+      SupportedIdentityProviders:
+        - COGNITO
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+
+  MoodUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Ref CognitoDomainPrefix
+      UserPoolId: !Ref MoodUserPool
+
+Outputs:
+  CognitoUserPoolId:
+    Value: !Ref MoodUserPool
+    Export:
+      Name: !Sub Mood-${EnvName}-CognitoUserPoolId
+
+  CognitoUserPoolArn:
+    Value: !GetAtt MoodUserPool.Arn
+    Export:
+      Name: !Sub Mood-${EnvName}-CognitoUserPoolArn
+
+  CognitoAppClientId:
+    Value: !Ref MoodUserPoolClient
+    Export:
+      Name: !Sub Mood-${EnvName}-CognitoAppClientId
+
+  CognitoUserPoolDomain:
+    Value: !Sub ${CognitoDomainPrefix}.auth.${AWS::Region}.amazoncognito.com
+    Export:
+      Name: !Sub Mood-${EnvName}-CognitoUserPoolDomain

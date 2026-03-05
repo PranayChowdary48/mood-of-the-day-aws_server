@@ -19,7 +19,7 @@ fi
 
 echo "Testing HTTPS domain: ${DOMAIN}"
 
-RESULT=$(curl -sS -o /dev/null -w "%{http_code} %{ssl_verify_result}" "https://${DOMAIN}/health")
+RESULT=$(curl -sS --max-time 15 --connect-timeout 5 -o /dev/null -w "%{http_code} %{ssl_verify_result}" "https://${DOMAIN}/health")
 HTTP_CODE=$(echo "${RESULT}" | awk '{print $1}')
 SSL_VERIFY=$(echo "${RESULT}" | awk '{print $2}')
 

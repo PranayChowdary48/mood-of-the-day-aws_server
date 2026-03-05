@@ -3,6 +3,15 @@ set -euo pipefail
 
 ENV_NAME="${1:-dev}"
 ASG_NAME="mood-${ENV_NAME}-compute-ContainerAsg"
+CLUSTER_NAME=""
+SERVICE_NAME=""
+
+export_value() {
+  local name="$1"
+  aws cloudformation list-exports \
+    --query "Exports[?Name=='${name}'].Value | [0]" \
+    --output text
+}
 
 if aws cloudformation describe-stacks --stack-name "mood-${ENV_NAME}-compute" >/dev/null 2>&1; then
   ASG_NAME=$(aws cloudformation describe-stacks \
@@ -28,7 +37,7 @@ fi
 echo "[chaos] terminating instance ${INSTANCE_ID} in ${ASG_NAME}"
 aws autoscaling terminate-instance-in-auto-scaling-group \
   --instance-id "${INSTANCE_ID}" \
-  --should-decrement-desired-capacity false >/dev/null
+  --no-should-decrement-desired-capacity >/dev/null
 
 echo "[chaos] waiting for ASG to recover desired in-service capacity"
 for i in {1..30}; do
@@ -42,11 +51,22 @@ for i in {1..30}; do
 
   if [[ "${in_service}" != "None" && "${desired}" != "None" && ${in_service} -ge ${desired} ]]; then
     echo "[chaos] ASG recovered (in-service=${in_service}, desired=${desired})"
-    exit 0
+    break
   fi
 
   sleep 20
 done
 
-echo "[chaos] timeout waiting for ASG recovery"
-exit 1
+if [[ "${in_service:-None}" == "None" || "${desired:-None}" == "None" || ${in_service:-0} -lt ${desired:-1} ]]; then
+  echo "[chaos] timeout waiting for ASG recovery"
+  exit 1
+fi
+
+CLUSTER_NAME="$(export_value "Mood-${ENV_NAME}-ClusterName")"
+SERVICE_NAME="$(export_value "Mood-${ENV_NAME}-ServiceName")"
+if [[ -n "${CLUSTER_NAME}" && "${CLUSTER_NAME}" != "None" && -n "${SERVICE_NAME}" && "${SERVICE_NAME}" != "None" ]]; then
+  echo "[chaos] waiting for ECS service to stabilize after instance replacement"
+  aws ecs wait services-stable --cluster "${CLUSTER_NAME}" --services "${SERVICE_NAME}"
+fi
+
+echo "[chaos] instance replacement assertions passed"

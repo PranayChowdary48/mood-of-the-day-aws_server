@@ -25,6 +25,6 @@ ENABLE_KINESIS=false \
 ENABLE_SQS=false \
 ENABLE_ALERTS=false \
 ENABLE_TLS_DOMAIN=false \
-bash "${ROOT_DIR}/versions/v1-cloudformation/scripts/deploy.sh" "${ENV_NAME}" "${MODE}"
+bash "${ROOT_DIR}/cloudformation/scripts/deploy.sh" "${ENV_NAME}" "${MODE}"
 
 echo "Pilot-light deployment completed in ${DR_REGION}"

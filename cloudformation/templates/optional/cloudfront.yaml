@@ -1,0 +1,196 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Static site on S3 + CloudFront, with /api/* routed to app origin.
+
+Parameters:
+  EnvName:
+    Type: String
+    AllowedValues: [dev, prod]
+    Default: dev
+  PriceClass:
+    Type: String
+    Default: PriceClass_100
+    AllowedValues: [PriceClass_100, PriceClass_200, PriceClass_All]
+  ApiOriginDomainName:
+    Type: String
+    Default: ""
+    Description: Optional custom API origin domain (for example api.dev.moodoftheday.fun).
+  AliasDomainName:
+    Type: String
+    Default: ""
+    Description: Optional custom CloudFront alias domain (for example dev.moodoftheday.fun).
+  ViewerCertificateArn:
+    Type: String
+    Default: ""
+    Description: ACM certificate ARN in us-east-1 for AliasDomainName.
+  HostedZoneId:
+    Type: String
+    Default: ""
+    Description: Route53 hosted zone id to create alias records for AliasDomainName.
+
+Conditions:
+  UseCustomApiOrigin: !Not [!Equals [!Ref ApiOriginDomainName, ""]]
+  HasAliasDomain: !Not [!Equals [!Ref AliasDomainName, ""]]
+  HasViewerCert: !Not [!Equals [!Ref ViewerCertificateArn, ""]]
+  HasHostedZone: !Not [!Equals [!Ref HostedZoneId, ""]]
+  UseAliasRecords: !And
+    - !Condition HasAliasDomain
+    - !Condition HasHostedZone
+
+Resources:
+  StaticBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub mood-${EnvName}-static-${AWS::AccountId}-${AWS::Region}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  StaticBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref StaticBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontServicePrincipalReadOnly
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub ${StaticBucket.Arn}/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${AlbDistribution}
+
+  OriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub mood-${EnvName}-oac
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  ApiOriginRequestPolicy:
+    Type: AWS::CloudFront::OriginRequestPolicy
+    Properties:
+      OriginRequestPolicyConfig:
+        Name: !Sub mood-${EnvName}-api-origin-requests
+        CookiesConfig:
+          CookieBehavior: all
+        HeadersConfig:
+          HeaderBehavior: allViewer
+        QueryStringsConfig:
+          QueryStringBehavior: all
+
+  AlbDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub mood-${EnvName}-static-api-distribution
+        HttpVersion: http2
+        PriceClass: !Ref PriceClass
+        DefaultRootObject: index.html
+        Aliases: !If
+          - HasAliasDomain
+          - - !Ref AliasDomainName
+          - !Ref AWS::NoValue
+        ViewerCertificate: !If
+          - HasAliasDomain
+          - AcmCertificateArn: !Ref ViewerCertificateArn
+            SslSupportMethod: sni-only
+            MinimumProtocolVersion: TLSv1.2_2021
+          - CloudFrontDefaultCertificate: true
+        Origins:
+          - Id: static-s3
+            DomainName: !GetAtt StaticBucket.RegionalDomainName
+            S3OriginConfig: {}
+            OriginAccessControlId: !Ref OriginAccessControl
+          - Id: app-alb
+            DomainName: !If
+              - UseCustomApiOrigin
+              - !Ref ApiOriginDomainName
+              - Fn::ImportValue:
+                  Fn::Sub: Mood-${EnvName}-LoadBalancerDnsName
+            CustomOriginConfig:
+              OriginProtocolPolicy: !If [UseCustomApiOrigin, https-only, http-only]
+              HTTPPort: 80
+              HTTPSPort: 443
+        DefaultCacheBehavior:
+          TargetOriginId: static-s3
+          ViewerProtocolPolicy: redirect-to-https
+          Compress: true
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD, OPTIONS]
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+        CacheBehaviors:
+          - PathPattern: /api/*
+            TargetOriginId: app-alb
+            ViewerProtocolPolicy: redirect-to-https
+            Compress: true
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
+            CachedMethods: [GET, HEAD, OPTIONS]
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            OriginRequestPolicyId: !Ref ApiOriginRequestPolicy
+          - PathPattern: /oauth2/*
+            TargetOriginId: app-alb
+            ViewerProtocolPolicy: redirect-to-https
+            Compress: true
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
+            CachedMethods: [GET, HEAD, OPTIONS]
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            OriginRequestPolicyId: !Ref ApiOriginRequestPolicy
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+
+  AliasRecordA:
+    Type: AWS::Route53::RecordSet
+    Condition: UseAliasRecords
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref AliasDomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt AlbDistribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2
+
+  AliasRecordAAAA:
+    Type: AWS::Route53::RecordSet
+    Condition: UseAliasRecords
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref AliasDomainName
+      Type: AAAA
+      AliasTarget:
+        DNSName: !GetAtt AlbDistribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2
+
+Outputs:
+  StaticBucketName:
+    Value: !Ref StaticBucket
+    Export:
+      Name: !Sub Mood-${EnvName}-StaticBucketName
+
+  DistributionDomainName:
+    Value: !GetAtt AlbDistribution.DomainName
+    Export:
+      Name: !Sub Mood-${EnvName}-CloudFrontDomainName
+
+  DistributionId:
+    Value: !Ref AlbDistribution
+    Export:
+      Name: !Sub Mood-${EnvName}-CloudFrontDistributionId
+
+  AliasDomainName:
+    Condition: HasAliasDomain
+    Value: !Ref AliasDomainName
+    Export:
+      Name: !Sub Mood-${EnvName}-CloudFrontAliasDomainName

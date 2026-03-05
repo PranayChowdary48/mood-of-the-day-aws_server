@@ -3,8 +3,10 @@ MODE ?= free-tier
 ALB_DNS ?=
 REQUESTS ?= 300
 CONCURRENCY ?= 20
+IMAGE_TAG ?= latest
+WAIT_FOR_SUCCESS ?= true
 
-# Shared feature toggles (used by v1 env vars and v2 CDK context)
+# Shared feature toggles for CloudFormation deploy/test flows
 ENABLE_VPC_ENDPOINTS ?=
 TASK_SUBNET_TYPE ?=
 LOAD_BALANCER_TYPE ?=
@@ -13,8 +15,8 @@ CACHE_BACKEND ?=
 DEPLOYMENT_STRATEGY ?=
 ENABLE_WAF ?=
 ENABLE_CLOUDFRONT ?=
+ENABLE_CLOUDFRONT_FRONTDOOR ?=
 ENABLE_ELASTICACHE ?=
-ENABLE_BLUEGREEN ?=
 REGION ?=
 
 NETWORK_PROFILE ?=
@@ -23,7 +25,6 @@ ENABLE_SQS ?=
 ENABLE_RDS ?=
 ENABLE_ALERTS ?=
 ALERT_EMAIL ?=
-ENABLE_STATIC_SITE ?=
 ENABLE_EFS ?=
 ENABLE_KINESIS ?=
 ENABLE_TLS_DOMAIN ?=
@@ -32,15 +33,22 @@ SUBDOMAIN ?= $(ENV)
 HOSTED_ZONE_ID ?=
 ENABLE_SECRET_ROTATION ?=
 ROTATION_DAYS ?= 7
+ENABLE_COGNITO ?=
+COGNITO_DOMAIN_PREFIX ?=
+COGNITO_CALLBACK_URL ?=
+COGNITO_LOGOUT_URL ?=
+ASSET_BASE_URL ?=
+CLOUDFRONT_CERT_ARN ?=
+ALB_CERT_ARN ?=
+API_SUBDOMAIN_LABEL ?= api
 
 PRIMARY_REGION ?=
 DR_REGION ?=
 
 .PHONY: \
   help \
-  v1-validate v1-deploy v1-destroy v1-outputs \
-  v2-bootstrap v2-synth v2-diff v2-deploy v2-destroy \
-  image-push upload-static smoke \
+  cf-validate cf-deploy cf-destroy cf-outputs \
+  image-push bluegreen-release upload-static smoke \
   test-bluegreen test-waf test-elasticache test-vpc-endpoints test-sqs test-rds test-cloudfront \
   test-efs test-kinesis test-tls-domain test-secret-rotation \
   chaos-kill-task chaos-terminate-instance chaos-cache-outage chaos-suite \
@@ -48,9 +56,9 @@ DR_REGION ?=
 
 help:
 	@echo "Mood AWS Make targets"
-	@echo "  v1-*                  CloudFormation workflow"
-	@echo "  v2-*                  CDK Python workflow"
+	@echo "  cf-*                  CloudFormation workflow"
 	@echo "  image-push            Build and push app image to ECR"
+	@echo "  bluegreen-release     Trigger ECS blue/green deployment via CodeDeploy"
 	@echo "  upload-static         Sync static-site/ to S3 and invalidate CloudFront"
 	@echo "  smoke                 Basic endpoint smoke test"
 	@echo "  test-*                Feature validation scripts"
@@ -60,17 +68,18 @@ help:
 	@echo "Common vars: ENV=dev|prod MODE=free-tier|showcase ALB_DNS=<dns>"
 	@echo "Infra vars: ENABLE_VPC_ENDPOINTS TASK_SUBNET_TYPE LOAD_BALANCER_TYPE"
 	@echo "            SECRET_BACKEND CACHE_BACKEND DEPLOYMENT_STRATEGY"
-	@echo "            ENABLE_WAF ENABLE_CLOUDFRONT ENABLE_ELASTICACHE ENABLE_BLUEGREEN"
+	@echo "            ENABLE_WAF ENABLE_CLOUDFRONT ENABLE_CLOUDFRONT_FRONTDOOR ENABLE_ELASTICACHE"
 	@echo "            NETWORK_PROFILE ENABLE_NAT_GATEWAY ENABLE_SQS ENABLE_RDS"
-	@echo "            ENABLE_ALERTS ALERT_EMAIL ENABLE_STATIC_SITE ENABLE_EFS ENABLE_KINESIS"
+	@echo "            ENABLE_ALERTS ALERT_EMAIL ENABLE_EFS ENABLE_KINESIS"
 	@echo "            ENABLE_TLS_DOMAIN DOMAIN_NAME SUBDOMAIN HOSTED_ZONE_ID"
-	@echo "            ENABLE_SECRET_ROTATION ROTATION_DAYS REGION"
+	@echo "            ENABLE_SECRET_ROTATION ROTATION_DAYS ENABLE_COGNITO"
+	@echo "            COGNITO_DOMAIN_PREFIX COGNITO_CALLBACK_URL COGNITO_LOGOUT_URL ASSET_BASE_URL CLOUDFRONT_CERT_ARN ALB_CERT_ARN API_SUBDOMAIN_LABEL REGION"
 
-# Version 1 (CloudFormation)
-v1-validate:
-	bash versions/v1-cloudformation/scripts/validate.sh
+# CloudFormation workflow
+cf-validate:
+	bash cloudformation/scripts/validate.sh
 
-v1-deploy:
+cf-deploy:
 	ENABLE_VPC_ENDPOINTS="$(ENABLE_VPC_ENDPOINTS)" \
 	TASK_SUBNET_TYPE="$(TASK_SUBNET_TYPE)" \
 	LOAD_BALANCER_TYPE="$(LOAD_BALANCER_TYPE)" \
@@ -79,6 +88,7 @@ v1-deploy:
 	DEPLOYMENT_STRATEGY="$(DEPLOYMENT_STRATEGY)" \
 	ENABLE_WAF="$(ENABLE_WAF)" \
 	ENABLE_CLOUDFRONT="$(ENABLE_CLOUDFRONT)" \
+	ENABLE_CLOUDFRONT_FRONTDOOR="$(ENABLE_CLOUDFRONT_FRONTDOOR)" \
 	ENABLE_ELASTICACHE="$(ENABLE_ELASTICACHE)" \
 	NETWORK_PROFILE="$(NETWORK_PROFILE)" \
 	ENABLE_NAT_GATEWAY="$(ENABLE_NAT_GATEWAY)" \
@@ -94,129 +104,29 @@ v1-deploy:
 	HOSTED_ZONE_ID="$(HOSTED_ZONE_ID)" \
 	ENABLE_SECRET_ROTATION="$(ENABLE_SECRET_ROTATION)" \
 	ROTATION_DAYS="$(ROTATION_DAYS)" \
-	bash versions/v1-cloudformation/scripts/deploy.sh $(ENV) $(MODE)
+	ENABLE_COGNITO="$(ENABLE_COGNITO)" \
+	COGNITO_DOMAIN_PREFIX="$(COGNITO_DOMAIN_PREFIX)" \
+	COGNITO_CALLBACK_URL="$(COGNITO_CALLBACK_URL)" \
+	COGNITO_LOGOUT_URL="$(COGNITO_LOGOUT_URL)" \
+	ASSET_BASE_URL="$(ASSET_BASE_URL)" \
+	CLOUDFRONT_CERT_ARN="$(CLOUDFRONT_CERT_ARN)" \
+	ALB_CERT_ARN="$(ALB_CERT_ARN)" \
+	API_SUBDOMAIN_LABEL="$(API_SUBDOMAIN_LABEL)" \
+	bash cloudformation/scripts/deploy.sh $(ENV) $(MODE)
 
-v1-destroy:
-	bash versions/v1-cloudformation/scripts/destroy.sh $(ENV)
+cf-destroy:
+	bash cloudformation/scripts/destroy.sh $(ENV)
 
-v1-outputs:
-	bash versions/v1-cloudformation/scripts/outputs.sh $(ENV)
-
-# Version 2 (CDK Python)
-v2-bootstrap:
-	bash versions/v2-cdk-python/scripts/bootstrap.sh
-
-v2-synth:
-	REGION="$(REGION)" \
-	ENABLE_VPC_ENDPOINTS="$(ENABLE_VPC_ENDPOINTS)" \
-	TASK_SUBNET_TYPE="$(TASK_SUBNET_TYPE)" \
-	LOAD_BALANCER_TYPE="$(LOAD_BALANCER_TYPE)" \
-	SECRET_BACKEND="$(SECRET_BACKEND)" \
-	CACHE_BACKEND="$(CACHE_BACKEND)" \
-	DEPLOYMENT_STRATEGY="$(DEPLOYMENT_STRATEGY)" \
-	ENABLE_WAF="$(ENABLE_WAF)" \
-	ENABLE_CLOUDFRONT="$(ENABLE_CLOUDFRONT)" \
-	ENABLE_ELASTICACHE="$(ENABLE_ELASTICACHE)" \
-	ENABLE_BLUEGREEN="$(ENABLE_BLUEGREEN)" \
-	NETWORK_PROFILE="$(NETWORK_PROFILE)" \
-	ENABLE_SQS="$(ENABLE_SQS)" \
-	ENABLE_RDS="$(ENABLE_RDS)" \
-	ENABLE_ALERTS="$(ENABLE_ALERTS)" \
-	ALERT_EMAIL="$(ALERT_EMAIL)" \
-	ENABLE_STATIC_SITE="$(ENABLE_STATIC_SITE)" \
-	ENABLE_EFS="$(ENABLE_EFS)" \
-	ENABLE_KINESIS="$(ENABLE_KINESIS)" \
-	ENABLE_TLS_DOMAIN="$(ENABLE_TLS_DOMAIN)" \
-	DOMAIN_NAME="$(DOMAIN_NAME)" \
-	SUBDOMAIN="$(SUBDOMAIN)" \
-	HOSTED_ZONE_ID="$(HOSTED_ZONE_ID)" \
-	ENABLE_SECRET_ROTATION="$(ENABLE_SECRET_ROTATION)" \
-	bash versions/v2-cdk-python/scripts/synth.sh $(ENV) $(MODE)
-
-v2-diff:
-	REGION="$(REGION)" \
-	ENABLE_VPC_ENDPOINTS="$(ENABLE_VPC_ENDPOINTS)" \
-	TASK_SUBNET_TYPE="$(TASK_SUBNET_TYPE)" \
-	LOAD_BALANCER_TYPE="$(LOAD_BALANCER_TYPE)" \
-	SECRET_BACKEND="$(SECRET_BACKEND)" \
-	CACHE_BACKEND="$(CACHE_BACKEND)" \
-	DEPLOYMENT_STRATEGY="$(DEPLOYMENT_STRATEGY)" \
-	ENABLE_WAF="$(ENABLE_WAF)" \
-	ENABLE_CLOUDFRONT="$(ENABLE_CLOUDFRONT)" \
-	ENABLE_ELASTICACHE="$(ENABLE_ELASTICACHE)" \
-	ENABLE_BLUEGREEN="$(ENABLE_BLUEGREEN)" \
-	NETWORK_PROFILE="$(NETWORK_PROFILE)" \
-	ENABLE_SQS="$(ENABLE_SQS)" \
-	ENABLE_RDS="$(ENABLE_RDS)" \
-	ENABLE_ALERTS="$(ENABLE_ALERTS)" \
-	ALERT_EMAIL="$(ALERT_EMAIL)" \
-	ENABLE_STATIC_SITE="$(ENABLE_STATIC_SITE)" \
-	ENABLE_EFS="$(ENABLE_EFS)" \
-	ENABLE_KINESIS="$(ENABLE_KINESIS)" \
-	ENABLE_TLS_DOMAIN="$(ENABLE_TLS_DOMAIN)" \
-	DOMAIN_NAME="$(DOMAIN_NAME)" \
-	SUBDOMAIN="$(SUBDOMAIN)" \
-	HOSTED_ZONE_ID="$(HOSTED_ZONE_ID)" \
-	ENABLE_SECRET_ROTATION="$(ENABLE_SECRET_ROTATION)" \
-	bash versions/v2-cdk-python/scripts/diff.sh $(ENV) $(MODE)
-
-v2-deploy:
-	REGION="$(REGION)" \
-	ENABLE_VPC_ENDPOINTS="$(ENABLE_VPC_ENDPOINTS)" \
-	TASK_SUBNET_TYPE="$(TASK_SUBNET_TYPE)" \
-	LOAD_BALANCER_TYPE="$(LOAD_BALANCER_TYPE)" \
-	SECRET_BACKEND="$(SECRET_BACKEND)" \
-	CACHE_BACKEND="$(CACHE_BACKEND)" \
-	DEPLOYMENT_STRATEGY="$(DEPLOYMENT_STRATEGY)" \
-	ENABLE_WAF="$(ENABLE_WAF)" \
-	ENABLE_CLOUDFRONT="$(ENABLE_CLOUDFRONT)" \
-	ENABLE_ELASTICACHE="$(ENABLE_ELASTICACHE)" \
-	ENABLE_BLUEGREEN="$(ENABLE_BLUEGREEN)" \
-	NETWORK_PROFILE="$(NETWORK_PROFILE)" \
-	ENABLE_SQS="$(ENABLE_SQS)" \
-	ENABLE_RDS="$(ENABLE_RDS)" \
-	ENABLE_ALERTS="$(ENABLE_ALERTS)" \
-	ALERT_EMAIL="$(ALERT_EMAIL)" \
-	ENABLE_STATIC_SITE="$(ENABLE_STATIC_SITE)" \
-	ENABLE_EFS="$(ENABLE_EFS)" \
-	ENABLE_KINESIS="$(ENABLE_KINESIS)" \
-	ENABLE_TLS_DOMAIN="$(ENABLE_TLS_DOMAIN)" \
-	DOMAIN_NAME="$(DOMAIN_NAME)" \
-	SUBDOMAIN="$(SUBDOMAIN)" \
-	HOSTED_ZONE_ID="$(HOSTED_ZONE_ID)" \
-	ENABLE_SECRET_ROTATION="$(ENABLE_SECRET_ROTATION)" \
-	bash versions/v2-cdk-python/scripts/deploy.sh $(ENV) $(MODE)
-
-v2-destroy:
-	REGION="$(REGION)" \
-	ENABLE_VPC_ENDPOINTS="$(ENABLE_VPC_ENDPOINTS)" \
-	TASK_SUBNET_TYPE="$(TASK_SUBNET_TYPE)" \
-	LOAD_BALANCER_TYPE="$(LOAD_BALANCER_TYPE)" \
-	SECRET_BACKEND="$(SECRET_BACKEND)" \
-	CACHE_BACKEND="$(CACHE_BACKEND)" \
-	DEPLOYMENT_STRATEGY="$(DEPLOYMENT_STRATEGY)" \
-	ENABLE_WAF="$(ENABLE_WAF)" \
-	ENABLE_CLOUDFRONT="$(ENABLE_CLOUDFRONT)" \
-	ENABLE_ELASTICACHE="$(ENABLE_ELASTICACHE)" \
-	ENABLE_BLUEGREEN="$(ENABLE_BLUEGREEN)" \
-	NETWORK_PROFILE="$(NETWORK_PROFILE)" \
-	ENABLE_SQS="$(ENABLE_SQS)" \
-	ENABLE_RDS="$(ENABLE_RDS)" \
-	ENABLE_ALERTS="$(ENABLE_ALERTS)" \
-	ALERT_EMAIL="$(ALERT_EMAIL)" \
-	ENABLE_STATIC_SITE="$(ENABLE_STATIC_SITE)" \
-	ENABLE_EFS="$(ENABLE_EFS)" \
-	ENABLE_KINESIS="$(ENABLE_KINESIS)" \
-	ENABLE_TLS_DOMAIN="$(ENABLE_TLS_DOMAIN)" \
-	DOMAIN_NAME="$(DOMAIN_NAME)" \
-	SUBDOMAIN="$(SUBDOMAIN)" \
-	HOSTED_ZONE_ID="$(HOSTED_ZONE_ID)" \
-	ENABLE_SECRET_ROTATION="$(ENABLE_SECRET_ROTATION)" \
-	bash versions/v2-cdk-python/scripts/destroy.sh $(ENV) $(MODE)
+cf-outputs:
+	bash cloudformation/scripts/outputs.sh $(ENV)
 
 # Shared helpers
 image-push:
 	bash scripts/build_push_image.sh
+
+bluegreen-release:
+	WAIT_FOR_SUCCESS="$(WAIT_FOR_SUCCESS)" \
+	bash scripts/deploy/bluegreen_codedeploy.sh $(ENV) "$(IMAGE_TAG)"
 
 upload-static:
 	bash scripts/upload_static_assets.sh $(ENV)

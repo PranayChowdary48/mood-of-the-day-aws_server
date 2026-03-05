@@ -1,120 +1,213 @@
-# Feature Comparisons
+# Feature comparisons (repo-specific)
 
-## 1) IaC style
+This document compares the implementation options available in this repository and explains which mode fits which objective.
 
-| Area | CloudFormation (v1) | CDK Python (v2) |
-|---|---|---|
-| Authoring | Direct YAML | Python constructs -> CloudFormation |
-| Review model | Template-centric | Code-centric |
-| Best fit | AWS-native infra teams | Platform-engineering style teams |
-
-## 2) ALB vs NLB
+## 1) Ingress mode: ALB vs NLB
 
 | Area | ALB | NLB |
 |---|---|---|
-| Layer | L7 HTTP | L4 TCP |
-| WAF support | Yes | No |
-| Blue/Green path | Yes | Not used |
-| App-aware metrics | Richer | More network-centric |
+| OSI layer | L7 HTTP/HTTPS | L4 TCP |
+| Path-based routing | Yes | No |
+| Cognito listener auth | Supported (HTTPS) | Not supported |
+| WAF association model in this repo | Primary | Not supported in this repo path |
+| Blue/green release integration | Primary pattern | Not used |
+| Observability emphasis | HTTP-aware | Connection/network-oriented |
 
-Toggle: `LOAD_BALANCER_TYPE=alb|nlb`
+**Guidance**
 
-## 3) Rolling vs Blue/Green
+- Use ALB for normal deployments and all advanced modules.
+- Use NLB only when showing L4 trade-offs.
+
+## 2) Deployment strategy: rolling vs blue/green
 
 | Area | Rolling | Blue/Green |
 |---|---|---|
+| Deployment controller | ECS | CodeDeploy |
+| Update path | Service task replacement | Traffic shift between task sets |
+| Rollback model | Circuit-breaker rollback | CodeDeploy traffic rollback |
 | Complexity | Lower | Higher |
-| Blast radius | Moderate | Lower with traffic control |
-| Rollback style | ECS circuit breaker | CodeDeploy traffic rollback |
+| Operational fit | Fast iteration | Safer release boundaries |
 
-Toggle: `DEPLOYMENT_STRATEGY=rolling|bluegreen`
+**Guidance**
 
-## 4) SSM vs Secrets Manager (+ rotation)
+- Rolling for baseline and early integration.
+- Blue/green for showcase/prod demonstrations.
 
-| Area | SSM | Secrets Manager |
+## 3) Secret backend: SSM vs Secrets Manager
+
+| Area | SSM Parameter Store | Secrets Manager |
 |---|---|---|
+| Cost profile | Lower | Higher |
+| Secret lifecycle features | Basic | Advanced |
+| Native rotation workflows | No | Yes |
+| Recommended use in repo | baseline | showcase/prod-like |
+
+## 4) Secret rotation: disabled vs enabled
+
+| Area | Disabled | Enabled |
+|---|---|---|
+| Simplicity | Higher | Lower |
+| Credential aging risk | Higher | Lower |
+| Extra resources | None | Rotation Lambda + schedule + permissions |
+| Validation needed | basic secret use | secret version transition + app continuity |
+
+## 5) Cache backend: sidecar Redis vs ElastiCache
+
+| Area | Sidecar Redis | ElastiCache Redis |
+|---|---|---|
+| Ownership | Task-local | Managed service |
+| Failure domain | Task lifecycle | Replication-group lifecycle |
+| Setup overhead | Low | Medium/High |
 | Cost | Lower | Higher |
-| Rotation lifecycle | Manual/custom | Native rotation support |
-| Fit | Config/light secret use | Strong secret lifecycle control |
+| Demo value | simple baseline | managed cache pattern |
 
-Toggles:
-- `SECRET_BACKEND=ssm|secretsmanager`
-- `ENABLE_SECRET_ROTATION=true`
+## 6) Request processing: sync refresh vs async queue
 
-## 5) Cache/data path choices
-
-| Area | Sidecar Redis | ElastiCache | RDS |
-|---|---|---|---|
-| Role | Local cache | Managed cache | Durable relational store |
-| Ops overhead | App-owned | AWS-managed | AWS-managed DB operations |
-| Durability | Low | Medium | High |
-
-Toggles:
-- `CACHE_BACKEND=sidecar|elasticache`
-- `ENABLE_RDS=true`
-
-## 6) Sync vs async refresh
-
-| Area | Sync | Async (SQS+DLQ) |
+| Area | Sync (`/refresh`) | Async (`/api/refresh` + SQS) |
 |---|---|---|
-| API behavior | Immediate response payload | `202 Accepted` + queued work |
-| Burst handling | Limited | Better backpressure handling |
-| Failure model | Direct request-path failures | Retries + DLQ |
+| Client behavior | immediate processing | `202 Accepted` |
+| Burst handling | limited | stronger decoupling |
+| Retry semantics | request-level only | queue retries + DLQ |
+| Operational complexity | lower | higher |
 
-Toggle: `ENABLE_SQS=true`
+## 7) Persistence tier: no RDS vs RDS enabled
 
-## 7) Filesystem choices
-
-| Area | S3 | EFS |
+| Area | Without RDS | With RDS |
 |---|---|---|
-| Storage model | Object | Shared POSIX filesystem |
-| Typical use | Static assets, artifacts | Shared mutable files between tasks |
-| Cost profile | Lower baseline | Higher |
+| Durable relational state | No | Yes |
+| Data model depth | limited | stronger persistence |
+| Health dependency | cache only | cache + DB readiness |
+| Cost/ops overhead | lower | higher |
 
-Toggle: `ENABLE_EFS=true`
+## 8) Shared storage: no EFS vs EFS enabled
 
-## 8) Queue vs stream
-
-| Area | SQS | Kinesis |
+| Area | Without EFS | With EFS |
 |---|---|---|
-| Pattern | Work queue | Event stream |
-| Ordering/throughput model | Queue semantics | Ordered shard semantics |
-| Consumer model | Pull worker | Stream consumers/analytics |
+| Shared writable filesystem | No | Yes |
+| Cross-task file visibility | No | Yes |
+| Runtime dependencies | fewer | more |
+| Cost/ops overhead | lower | higher |
 
-Toggle: `ENABLE_KINESIS=true`
+## 9) Streaming: no Kinesis vs Kinesis enabled
 
-## 9) Direct LB vs CloudFront edge
-
-| Area | ALB direct | CloudFront + S3 + ALB API |
+| Area | Without Kinesis | With Kinesis |
 |---|---|---|
-| Static delivery | App/LB path | Edge cached from S3 |
-| API path | direct `/api/*` | `/api/*` forwarded to ALB |
-| Global latency profile | Regional | Better edge distribution |
+| Event stream path | absent | present |
+| Queue-vs-stream comparison value | low | high |
+| Operational footprint | lower | higher |
+| Cost profile | lower | higher |
 
-Toggle: `ENABLE_CLOUDFRONT=true`
+## 10) Network profile: baseline vs strict-private
 
-## 10) No custom domain vs Route53+ACM TLS
-
-| Area | AWS-generated DNS | Custom domain TLS |
+| Area | Baseline | Strict-private |
 |---|---|---|
-| URL | ALB/CloudFront generated host | `*.moodoftheday.fun` style host |
-| Cert lifecycle | Implicit/default endpoint certs | ACM-managed custom cert |
-| DNS control | None | Route53 alias control |
+| Task isolation posture | moderate | stronger |
+| NAT dependency | optional | typical |
+| Endpoint alignment | optional | common |
+| Cost profile | lower | higher |
+| Operational depth | lower | higher |
 
-Toggles:
-- `ENABLE_TLS_DOMAIN=true`
-- `DOMAIN_NAME`, `SUBDOMAIN`, `HOSTED_ZONE_ID`
+## 11) VPC endpoints: disabled vs enabled
 
-## 11) Single-region vs DR automation scripts
-
-| Area | Single-region focus | Scripted DR drill |
+| Area | Disabled | Enabled |
 |---|---|---|
-| Recovery | Manual ad-hoc | Snapshot copy + pilot-light + DNS failover scripts |
-| Complexity | Lower | Higher |
-| Cost | Lower | Higher when exercised |
+| Endpoint hourly cost | none | present |
+| Service access path | internet/NAT route | private endpoint route |
+| Private traffic posture | moderate | stronger |
+| Cost efficiency | higher | lower |
 
-Targets:
-- `dr-copy-rds`
-- `dr-pilot-light`
-- `dr-failover`
-- `dr-drill`
+## 12) Edge delivery: ALB direct vs CloudFront + S3 + ALB API
+
+| Area | ALB direct | CloudFront+S3 |
+|---|---|---|
+| Static delivery | app/LB path | edge cached objects |
+| API delivery | direct ALB | `/api/*` forwarded to ALB |
+| OAuth callback routing | direct ALB | `/oauth2/*` forwarded to ALB |
+| Latency posture | regional | edge-enhanced |
+| Complexity/cost | lower | higher |
+
+## 13) Domain/TLS mode: generated endpoints vs Route53+ACM
+
+| Area | AWS-generated endpoint | Custom domain + ACM |
+|---|---|---|
+| DNS control | minimal | full alias control |
+| Certificate lifecycle | default endpoint behavior | explicit certificate control |
+| User-facing endpoint quality | lower | higher |
+| Dependency surface | lower | higher |
+
+## 14) Auth boundary: no Cognito vs Cognito at ALB
+
+| Area | No Cognito | Cognito enabled |
+|---|---|---|
+| Auth boundary | app/public path | enforced before app forwarding |
+| Unauthenticated behavior | app-defined | hosted login redirect |
+| Listener requirements | standard | HTTPS ALB listener required |
+| Configuration coupling | lower | higher (domain/callback alignment) |
+
+## 15) Observability: basic checks vs dashboard+alarms+SNS
+
+| Area | Basic checks only | CloudWatch + SNS path |
+|---|---|---|
+| Operator signal | limited | stronger |
+| SLO visibility | limited | explicit SLO-focused metrics |
+| Alert fan-out | none | topic/email-capable |
+| Cost/ops overhead | lower | higher |
+
+## 16) Validation depth: functional only vs functional+chaos+DR
+
+| Area | Functional only | Functional + chaos + DR |
+|---|---|---|
+| Confidence in recovery behavior | moderate | higher |
+| Failure-mode coverage | narrower | broader |
+| Time and resource usage | lower | higher |
+
+## 17) Recommended profiles in this repo
+
+### 17.1 Cost-focused dev profile
+
+- ALB + rolling
+- baseline network
+- SSM backend
+- sidecar cache
+- optional CloudFront static only if needed
+- no RDS/EFS/Kinesis/ElastiCache unless specifically testing
+
+### 17.2 Full showcase profile
+
+- ALB + blue/green
+- strict-private network
+- Secrets Manager + rotation
+- CloudFront (+ optional custom domain frontdoor)
+- Cognito at ALB boundary
+- managed integrations (ElastiCache, SQS, RDS, EFS, optional Kinesis)
+- full observability + chaos + DR drills
+
+## 18) Current repo boundaries vs next repos
+
+### 18.1 Current repo vs serverless repo
+
+| Area | Current repo (server-based) | Next repo (serverless target) |
+|---|---|---|
+| Compute model | ECS on EC2 | Lambda/event-driven |
+| Scaling primitive | service/ASG scaling | concurrency-driven scaling |
+| Entry pattern | ALB/CloudFront | API Gateway/edge-to-function |
+| Runtime management | container + host capacity | function-level runtime lifecycle |
+
+### 18.2 Current repo vs Terraform repo
+
+| Area | Current repo | Next repo |
+|---|---|---|
+| IaC language | CloudFormation YAML | Terraform HCL |
+| State handling | stack state in AWS | Terraform state backend |
+| Change workflow | stack update/rollback | plan/apply workflow |
+
+### 18.3 Current repo vs CI/CD repo
+
+| Area | Current repo | Next repo |
+|---|---|---|
+| Deployment trigger | operator-driven scripts | pipeline-driven automation |
+| Promotion flow | manual environment progression | gated automated promotion |
+| Rollback initiation | operator-driven | policy/pipeline-driven |
+| Release metadata | command/script output | pipeline artifacts and audit trail |
+
+This repo is the server-based CloudFormation foundation; serverless architecture, Terraform IaC, and CI/CD automation are intentionally separated into the next repositories.

@@ -15,7 +15,12 @@ fi
 echo "Health check"
 curl -fsS "http://${ALB_DNS}/health" | cat
 
-echo "Home page check"
-curl -fsS "http://${ALB_DNS}/" >/dev/null
+echo "API auth gate check"
+API_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://${ALB_DNS}/api/mood")
+if [[ "${API_STATUS}" != "200" && "${API_STATUS}" != "302" && "${API_STATUS}" != "303" && "${API_STATUS}" != "307" ]]; then
+  echo "Unexpected /api/mood status: ${API_STATUS}"
+  exit 1
+fi
+echo "/api/mood status: ${API_STATUS}"
 
 echo "Smoke test passed"

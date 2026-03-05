@@ -1,23 +1,190 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
+  <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Mood App</title>
-  <link rel="stylesheet" href="/styles.css" />
+  <title>Mood of the Day</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      text-align: center;
+      background-color: #f5f5f5;
+      margin: 0;
+      padding: 20px;
+    }
+
+    h1 {
+      margin-bottom: 20px;
+    }
+
+
+    .gif-container {
+      position: relative;
+      display: inline-block;
+      max-width: 960px;
+      width: 100%;
+    }
+
+    .gif-container img {
+      width: 100%;
+      max-height: 70vh;
+      object-fit: contain;
+      border-radius: 12px;
+      background: #ececec;
+    }
+
+    .refresh-btn {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 64px;
+      height: 64px;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      font-size: 32px;
+      color: rgba(255, 255, 255, 0.8);
+      background: rgba(0, 0, 0, 0.25);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      border: 1px solid rgba(255, 255, 255, 0.35);
+      border-radius: 14px;
+      cursor: pointer;
+      transition: all 0.2s ease-in-out;
+    }
+
+    .refresh-btn:hover {
+      color: rgba(255, 255, 255, 1);
+      transform: translate(-50%, -50%) scale(1.08);
+    }
+
+    .gif-container:hover .refresh-btn {
+      display: flex;
+    }
+
+    .meta-info {
+      position: fixed;
+      bottom: 12px;
+      right: 12px;
+      font-size: 12px;
+      color: #555;
+      text-align: right;
+      background: rgba(255, 255, 255, 0.72);
+      backdrop-filter: blur(6px);
+      padding: 8px 10px;
+      border-radius: 8px;
+    }
+
+    .status {
+      margin-top: 14px;
+      color: #666;
+      font-size: 13px;
+      min-height: 18px;
+    }
+
+    footer {
+      margin-top: 30px;
+      font-size: 18px;
+      font-weight: bold;
+    }
+  </style>
 </head>
 <body>
-  <main class="card">
-    <h1>Today's Mood</h1>
-    <p id="mood" class="mood">Loading...</p>
-    <img id="gif" class="gif" alt="mood gif" />
-    <p id="meta" class="meta"></p>
-    <div class="actions">
-      <button id="refreshBtn" type="button">Refresh Mood</button>
-      <button id="reloadBtn" type="button">Reload</button>
-    </div>
-    <pre id="status" class="status"></pre>
-  </main>
-  <script src="/app.js"></script>
+  <h1 id="mood-title">Mood of the Day</h1>
+
+  <div class="gif-container">
+    <img id="mood-gif" alt="Mood gif" />
+    <div class="refresh-btn" onclick="refreshMood()">⟳</div>
+  </div>
+
+  <p class="status" id="status"></p>
+
+  <footer>
+    ROCK your attitude any day of the week 🤘
+  </footer>
+
+  <div class="meta-info">
+    <div><strong>Generated at:</strong> <span id="generated-at">--</span></div>
+    <div style="margin-top: 4px;"><strong>Running on:</strong> <span id="hostname">--</span></div>
+  </div>
+
+  <script>
+    function setStatus(message) {
+      document.getElementById("status").textContent = message || "";
+    }
+
+    function triggerLogin() {
+      window.location.href = "/api/login";
+    }
+
+    function renderMood(data) {
+      document.getElementById("mood-title").innerText = "Mood of the Day: " + (data.mood || "--");
+      document.getElementById("mood-gif").src = data.gif || "";
+      document.getElementById("generated-at").innerText = data.generated_at || "--";
+      document.getElementById("hostname").innerText = data.hostname || "--";
+      setStatus("");
+    }
+
+    async function loadMood(forceLoginOnFailure) {
+      try {
+        const response = await fetch("/api/mood", {
+          method: "GET",
+          credentials: "same-origin"
+        });
+
+        if (!response.ok) {
+          throw new Error("mood request failed with status " + response.status);
+        }
+
+        const contentType = response.headers.get("content-type") || "";
+        if (!contentType.includes("application/json")) {
+          throw new Error("unexpected content-type: " + contentType);
+        }
+
+        const data = await response.json();
+        renderMood(data);
+      } catch (err) {
+        if (forceLoginOnFailure) {
+          triggerLogin();
+          return;
+        }
+        setStatus("Unable to load mood right now.");
+      }
+    }
+
+    async function refreshMood() {
+      try {
+        const response = await fetch("/api/refresh", {
+          method: "POST",
+          credentials: "same-origin"
+        });
+
+        if (response.status === 202) {
+          setStatus("Refresh queued.");
+          await loadMood(false);
+          return;
+        }
+
+        if (!response.ok) {
+          throw new Error("refresh failed with status " + response.status);
+        }
+
+        const contentType = response.headers.get("content-type") || "";
+        if (!contentType.includes("application/json")) {
+          throw new Error("unexpected content-type: " + contentType);
+        }
+
+        const data = await response.json();
+        renderMood(data);
+      } catch (err) {
+        triggerLogin();
+      }
+    }
+
+    window.addEventListener("load", function () {
+      loadMood(true);
+    });
+  </script>
 </body>
 </html>

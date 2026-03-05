@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Destroy v1 stacks in reverse dependency order.
+# Destroy CloudFormation stacks in reverse dependency order.
 # Usage: ./destroy.sh [env]
 ENV_NAME="${1:-dev}"
 
@@ -28,6 +28,7 @@ delete_stack_if_exists "${base}-cloudfront"
 delete_stack_if_exists "${base}-waf"
 delete_stack_if_exists "${base}-observability"
 delete_stack_if_exists "${base}-compute"
+delete_stack_if_exists "${base}-cognito"
 delete_stack_if_exists "${base}-elasticache"
 delete_stack_if_exists "${base}-kinesis"
 delete_stack_if_exists "${base}-efs"

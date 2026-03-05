@@ -73,8 +73,21 @@ Parameters:
     Type: String
     AllowedValues: ["true", "false"]
     Default: "false"
+  EnableCognitoAuth:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+  AlbCertificateArn:
+    Type: String
+    Default: ""
+    Description: ACM certificate ARN in this region for ALB HTTPS listener (required for bluegreen + Cognito).
+  AssetBaseUrl:
+    Type: String
+    Default: ""
+    Description: Optional absolute base URL for static assets (for example https://dxxxxx.cloudfront.net).
 
 Conditions:
+  IsProd: !Equals [!Ref EnvName, prod]
   UsePrivateTasks: !Equals [!Ref TaskSubnetType, private]
   UseSsm: !Equals [!Ref SecretBackend, ssm]
   UseSecretsManager: !Equals [!Ref SecretBackend, secretsmanager]
@@ -89,6 +102,19 @@ Conditions:
   UseRds: !Equals [!Ref EnableRds, "true"]
   UseEfs: !Equals [!Ref EnableEfs, "true"]
   UseKinesis: !Equals [!Ref EnableKinesis, "true"]
+  UseCognitoAuth: !Equals [!Ref EnableCognitoAuth, "true"]
+  UseAlbCognitoAuth: !And
+    - !Condition IsAlb
+    - !Condition UseCognitoAuth
+  UseAlbHttpRedirectToHttps:
+    !And
+      - !Condition IsAlb
+      - !Condition UseCognitoAuth
+      - !Not [!Condition UseBlueGreenAlb]
+  UseBlueGreenCognito:
+    !And
+      - !Condition UseBlueGreenAlb
+      - !Condition UseCognitoAuth
 
 Resources:
   EcsCluster:
@@ -209,6 +235,10 @@ Resources:
         - IpProtocol: tcp
           FromPort: 80
           ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
           CidrIp: 0.0.0.0/0
       SecurityGroupEgress:
         - IpProtocol: -1
@@ -365,7 +395,57 @@ Resources:
       LoadBalancerArn: !Ref AppLoadBalancer
       Port: 80
       Protocol: HTTP
+      DefaultActions: !If
+        - UseAlbHttpRedirectToHttps
+        - - Type: redirect
+            RedirectConfig:
+              Protocol: HTTPS
+              Port: "443"
+              Host: "#{host}"
+              Path: "/#{path}"
+              Query: "#{query}"
+              StatusCode: HTTP_301
+        - - Type: forward
+            TargetGroupArn: !Ref AlbBlueTargetGroup
+
+  AlbHttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: UseBlueGreenCognito
+    Properties:
+      LoadBalancerArn: !Ref AppLoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref AlbCertificateArn
       DefaultActions:
+        - Type: authenticate-cognito
+          Order: 1
+          AuthenticateCognitoConfig:
+            UserPoolArn:
+              Fn::ImportValue:
+                Fn::Sub: Mood-${EnvName}-CognitoUserPoolArn
+            UserPoolClientId:
+              Fn::ImportValue:
+                Fn::Sub: Mood-${EnvName}-CognitoAppClientId
+            UserPoolDomain:
+              Fn::ImportValue:
+                Fn::Sub: Mood-${EnvName}-CognitoUserPoolDomain
+            Scope: openid
+            OnUnauthenticatedRequest: authenticate
+        - Type: forward
+          Order: 2
+          TargetGroupArn: !Ref AlbBlueTargetGroup
+
+  AlbHttpsHealthBypassRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Condition: UseBlueGreenCognito
+    Properties:
+      ListenerArn: !Ref AlbHttpsListener
+      Priority: 1
+      Conditions:
+        - Field: path-pattern
+          Values: [/health, /live]
+      Actions:
         - Type: forward
           TargetGroupArn: !Ref AlbBlueTargetGroup
 
@@ -424,8 +504,8 @@ Resources:
       Family: !Sub mood-app-${EnvName}
       RequiresCompatibilities: [EC2]
       NetworkMode: awsvpc
-      Cpu: "512"
-      Memory: "1024"
+      Cpu: !If [IsProd, "512", "256"]
+      Memory: !If [IsProd, "1024", "512"]
       ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
       TaskRoleArn: !GetAtt TaskRole.Arn
       ContainerDefinitions:
@@ -443,6 +523,8 @@ Resources:
           Environment:
             - Name: SERVICE_NAME
               Value: !Sub mood-${EnvName}
+            - Name: ASSET_BASE_URL
+              Value: !Ref AssetBaseUrl
             - Name: REDIS_HOST
               Value: !If
                 - UseElastiCache
@@ -609,7 +691,6 @@ Resources:
           Rollback: !If [UseBlueGreenAlb, false, true]
       NetworkConfiguration:
         AwsvpcConfiguration:
-          AssignPublicIp: !If [UsePrivateTasks, DISABLED, ENABLED]
           SecurityGroups: [!Ref TaskSecurityGroup]
           Subnets: !If
             - UsePrivateTasks
@@ -638,7 +719,7 @@ Resources:
               Service: codedeploy.amazonaws.com
             Action: sts:AssumeRole
       ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSCodeDeployRoleForECS
+        - arn:aws:iam::aws:policy/AWSCodeDeployRoleForECS
 
   CodeDeployApplication:
     Type: AWS::CodeDeploy::Application
@@ -674,7 +755,7 @@ Resources:
               - Name: !GetAtt AlbBlueTargetGroup.TargetGroupName
               - Name: !GetAtt AlbGreenTargetGroup.TargetGroupName
             ProdTrafficRoute:
-              ListenerArns: [!Ref AlbHttpListener]
+              ListenerArns: [!If [UseBlueGreenCognito, !Ref AlbHttpsListener, !Ref AlbHttpListener]]
             TestTrafficRoute:
               ListenerArns: [!Ref AlbTestListener]
       ECSServices:

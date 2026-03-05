@@ -6,10 +6,10 @@ import random
 import socket
 import threading
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Tuple
 
 import redis
-from flask import Flask, Response, g, jsonify, render_template, request
+from flask import Flask, Response, g, has_request_context, jsonify, redirect, render_template, request
 from prometheus_client import Counter, Gauge, Histogram, generate_latest
 from pythonjsonlogger import jsonlogger
 
@@ -164,15 +164,19 @@ def persist_mood(day_iso: str, mood: str, gif: str, generated_at: str, source: s
         logger.error("db_write_failed", extra={"error": str(exc)})
 
 
-def require_basic_auth() -> bool:
-    user = os.getenv("REFRESH_USER")
-    password = os.getenv("REFRESH_PASSWORD")
-    if not user or not password:
-        return False
-    auth = request.authorization
-    if not auth:
-        return False
-    return auth.username == user and auth.password == password
+def _request_asset_base_url() -> str:
+    # Only use explicitly configured static asset base. If absent, fall back to public GIF URLs.
+    if ASSET_BASE_URL:
+        return ASSET_BASE_URL
+    return ""
+
+
+def _gif_for_mood(mood: str) -> str:
+    filename = MOOD_FILES.get(mood)
+    base = _request_asset_base_url()
+    if filename and base:
+        return f"{base}/gifs/{filename}"
+    return MOOD_FALLBACK.get(mood, "")
 
 
 def publish_kinesis_event(event_type: str, payload: Dict[str, Any]) -> None:
@@ -239,24 +243,23 @@ def get_or_generate_mood(force_refresh: bool = False, source: str = "api") -> Di
     if not force_refresh:
         cached = redis_client.hgetall(redis_key)
 
-    if cached:
+    if cached and cached.get("mood") and cached.get("generated_at"):
         mood = cached["mood"]
-        gif = cached["gif"]
         generated_at = cached["generated_at"]
         cache_status = "HIT"
     else:
-        mood, gif = random.choice(list(MOODS.items()))
+        mood = random.choice(list(MOODS.keys()))
         generated_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        redis_client.hset(redis_key, mapping={"mood": mood, "gif": gif, "generated_at": generated_at})
+        redis_client.hset(redis_key, mapping={"mood": mood, "generated_at": generated_at})
         redis_client.expire(redis_key, seconds_until_midnight())
         cache_status = "MISS"
-        persist_mood(day, mood, gif, generated_at, source)
+        persist_mood(day, mood, _gif_for_mood(mood), generated_at, source)
 
     logger.info(
         "mood_generated",
         extra={
             "container": hostname,
-            "request_path": request.path if request else "worker",
+            "request_path": request.path if has_request_context() else "worker",
             "redis_key": redis_key,
             "cache_status": cache_status,
             "mood": mood,
@@ -277,7 +280,7 @@ def get_or_generate_mood(force_refresh: bool = False, source: str = "api") -> Di
 
     return {
         "mood": mood,
-        "gif": gif,
+        "gif": _gif_for_mood(mood),
         "generated_at": generated_at,
         "hostname": hostname,
         "cache_status": cache_status,
@@ -339,12 +342,14 @@ def api_mood():
     return jsonify(get_or_generate_mood(force_refresh=False, source="api"))
 
 
+@app.route("/api/login")
+def api_login():
+    return redirect("/", code=302)
+
+
 @app.route("/refresh", methods=["POST"])
 @app.route("/api/refresh", methods=["POST"])
 def refresh_mood():
-    if not require_basic_auth():
-        return Response("Unauthorized", 401, {"WWW-Authenticate": 'Basic realm="mood"'})
-
     if SQS_ASYNC_REFRESH and sqs_client and QUEUE_URL:
         enqueue_refresh()
         return jsonify({"status": "accepted", "mode": "async", "queue_url": QUEUE_URL}), 202

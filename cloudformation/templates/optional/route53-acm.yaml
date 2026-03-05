@@ -1,0 +1,231 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Optional custom domain + ACM certificate + ALB HTTPS listener.
+
+Parameters:
+  EnvName:
+    Type: String
+    AllowedValues: [dev, prod]
+    Default: dev
+  DomainName:
+    Type: String
+    Default: moodoftheday.fun
+  HostedZoneId:
+    Type: String
+    Description: Route53 hosted zone id for DomainName.
+  Subdomain:
+    Type: String
+    Default: ""
+  EnableCognitoAuth:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+  DeploymentStrategy:
+    Type: String
+    AllowedValues: [rolling, bluegreen]
+    Default: rolling
+  CreatePrimaryAliasToAlb:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "true"
+  CreateApiAliasToAlb:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+  ApiSubdomainLabel:
+    Type: String
+    Default: api
+
+Conditions:
+  HasSubdomain: !Not [!Equals [!Ref Subdomain, ""]]
+  UseCognitoAuth: !Equals [!Ref EnableCognitoAuth, "true"]
+  UseBlueGreen: !Equals [!Ref DeploymentStrategy, bluegreen]
+  UseComputeManagedHttpsListener: !And
+    - !Condition UseCognitoAuth
+    - !Condition UseBlueGreen
+  CreateDomainHttpsListener: !Not [!Condition UseComputeManagedHttpsListener]
+  UseDomainHealthBypassRule: !And
+    - !Condition UseCognitoAuth
+    - !Condition CreateDomainHttpsListener
+  UsePrimaryAlias: !Equals [!Ref CreatePrimaryAliasToAlb, "true"]
+  UseApiAlias: !Equals [!Ref CreateApiAliasToAlb, "true"]
+
+Resources:
+  DomainCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !If
+        - HasSubdomain
+        - !Sub ${Subdomain}.${DomainName}
+        - !Ref DomainName
+      ValidationMethod: DNS
+      SubjectAlternativeNames: !If
+        - UseApiAlias
+        - - !If
+            - HasSubdomain
+            - !Sub ${ApiSubdomainLabel}.${Subdomain}.${DomainName}
+            - !Sub ${ApiSubdomainLabel}.${DomainName}
+        - !Ref AWS::NoValue
+      DomainValidationOptions: !If
+        - UseApiAlias
+        - - DomainName: !If
+              - HasSubdomain
+              - !Sub ${Subdomain}.${DomainName}
+              - !Ref DomainName
+            HostedZoneId: !Ref HostedZoneId
+          - DomainName: !If
+              - HasSubdomain
+              - !Sub ${ApiSubdomainLabel}.${Subdomain}.${DomainName}
+              - !Sub ${ApiSubdomainLabel}.${DomainName}
+            HostedZoneId: !Ref HostedZoneId
+        - - DomainName: !If
+              - HasSubdomain
+              - !Sub ${Subdomain}.${DomainName}
+              - !Ref DomainName
+            HostedZoneId: !Ref HostedZoneId
+
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: CreateDomainHttpsListener
+    Properties:
+      LoadBalancerArn:
+        Fn::ImportValue:
+          Fn::Sub: Mood-${EnvName}-AlbArn
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref DomainCertificate
+      DefaultActions: !If
+        - UseCognitoAuth
+        - - Type: authenticate-cognito
+            Order: 1
+            AuthenticateCognitoConfig:
+              UserPoolArn:
+                Fn::ImportValue:
+                  Fn::Sub: Mood-${EnvName}-CognitoUserPoolArn
+              UserPoolClientId:
+                Fn::ImportValue:
+                  Fn::Sub: Mood-${EnvName}-CognitoAppClientId
+              UserPoolDomain:
+                Fn::ImportValue:
+                  Fn::Sub: Mood-${EnvName}-CognitoUserPoolDomain
+              Scope: openid
+              OnUnauthenticatedRequest: authenticate
+          - Type: forward
+            Order: 2
+            TargetGroupArn:
+              Fn::ImportValue:
+                Fn::Sub: Mood-${EnvName}-AlbTargetGroupArn
+        - - Type: forward
+            TargetGroupArn:
+              Fn::ImportValue:
+                Fn::Sub: Mood-${EnvName}-AlbTargetGroupArn
+
+  HttpsHealthBypassRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Condition: UseDomainHealthBypassRule
+    Properties:
+      ListenerArn: !Ref HttpsListener
+      Priority: 1
+      Conditions:
+        - Field: path-pattern
+          Values: [/health, /live]
+      Actions:
+        - Type: forward
+          TargetGroupArn:
+            Fn::ImportValue:
+              Fn::Sub: Mood-${EnvName}-AlbTargetGroupArn
+
+  AppAliasRecordA:
+    Type: AWS::Route53::RecordSet
+    Condition: UsePrimaryAlias
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !If
+        - HasSubdomain
+        - !Sub ${Subdomain}.${DomainName}
+        - !Ref DomainName
+      Type: A
+      AliasTarget:
+        DNSName:
+          Fn::ImportValue:
+            Fn::Sub: Mood-${EnvName}-LoadBalancerDnsName
+        HostedZoneId:
+          Fn::ImportValue:
+            Fn::Sub: Mood-${EnvName}-AlbCanonicalHostedZoneId
+
+  AppAliasRecordAAAA:
+    Type: AWS::Route53::RecordSet
+    Condition: UsePrimaryAlias
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !If
+        - HasSubdomain
+        - !Sub ${Subdomain}.${DomainName}
+        - !Ref DomainName
+      Type: AAAA
+      AliasTarget:
+        DNSName:
+          Fn::ImportValue:
+            Fn::Sub: Mood-${EnvName}-LoadBalancerDnsName
+        HostedZoneId:
+          Fn::ImportValue:
+            Fn::Sub: Mood-${EnvName}-AlbCanonicalHostedZoneId
+
+  ApiAliasRecordA:
+    Type: AWS::Route53::RecordSet
+    Condition: UseApiAlias
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !If
+        - HasSubdomain
+        - !Sub ${ApiSubdomainLabel}.${Subdomain}.${DomainName}
+        - !Sub ${ApiSubdomainLabel}.${DomainName}
+      Type: A
+      AliasTarget:
+        DNSName:
+          Fn::ImportValue:
+            Fn::Sub: Mood-${EnvName}-LoadBalancerDnsName
+        HostedZoneId:
+          Fn::ImportValue:
+            Fn::Sub: Mood-${EnvName}-AlbCanonicalHostedZoneId
+
+  ApiAliasRecordAAAA:
+    Type: AWS::Route53::RecordSet
+    Condition: UseApiAlias
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !If
+        - HasSubdomain
+        - !Sub ${ApiSubdomainLabel}.${Subdomain}.${DomainName}
+        - !Sub ${ApiSubdomainLabel}.${DomainName}
+      Type: AAAA
+      AliasTarget:
+        DNSName:
+          Fn::ImportValue:
+            Fn::Sub: Mood-${EnvName}-LoadBalancerDnsName
+        HostedZoneId:
+          Fn::ImportValue:
+            Fn::Sub: Mood-${EnvName}-AlbCanonicalHostedZoneId
+
+Outputs:
+  CertificateArn:
+    Value: !Ref DomainCertificate
+    Export:
+      Name: !Sub Mood-${EnvName}-CertificateArn
+
+  AppDomainName:
+    Value: !If
+      - HasSubdomain
+      - !Sub ${Subdomain}.${DomainName}
+      - !Ref DomainName
+    Export:
+      Name: !Sub Mood-${EnvName}-AppDomainName
+
+  ApiDomainName:
+    Condition: UseApiAlias
+    Value: !If
+      - HasSubdomain
+      - !Sub ${ApiSubdomainLabel}.${Subdomain}.${DomainName}
+      - !Sub ${ApiSubdomainLabel}.${DomainName}
+    Export:
+      Name: !Sub Mood-${EnvName}-ApiDomainName

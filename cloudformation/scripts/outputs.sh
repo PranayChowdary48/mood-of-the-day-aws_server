@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Print useful outputs across v1 stacks.
+# Print useful outputs across CloudFormation stacks.
 # Usage: ./outputs.sh [env]
 ENV_NAME="${1:-dev}"
 BASE="mood-${ENV_NAME}"
@@ -20,3 +20,6 @@ print_outputs "${BASE}-registry"
 print_outputs "${BASE}-config"
 print_outputs "${BASE}-compute"
 print_outputs "${BASE}-observability"
+print_outputs "${BASE}-cognito"
+print_outputs "${BASE}-cloudfront"
+print_outputs "${BASE}-domain"
